@@ -27,7 +27,14 @@ def _make_patched_cgi(owner, parent):
 
     cgi = inspect.getattr_static(owner, "__class_getitem__", None)
     if isinstance(cgi, classmethod):
+        if cgi.__func__ is None:
+            print("cgi.__func__ is None", cgi, owner)
         cgi = cgi.__func__
+    # else:
+    #     bound_cgi = getattr(owner, "__class_getitem__", None)
+
+    # cgi.__func__ is None
+    # bound_cgi.__func__ is cgi.__func__
     if cgi is None:
         bound_cgi = getattr(owner, "__class_getitem__", None)
         if bound_cgi is None:
@@ -70,12 +77,41 @@ def _make_patched_cgi(owner, parent):
 
 
 def _make_patched_init_subclass(owner):
-    orig_init_subclass = owner.__init_subclass__.__func__
+    if isinstance(owner.__init_subclass__, types.BuiltinFunctionType) or isinstance(
+        owner.__init_subclass__, types.BuiltinMethodType
+    ):
+        _orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+
+        def orig_init_subclass(cls):
+            # return
+            super(owner, cls).__init_subclass__()
+            # _orig_init_subclass(cls)
+            # _orig_init_subclass
+
+    else:
+        # orig_init_subclass = owner.__init_subclass__.__func__
+        orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+        # owner._prev_orig_init_subclass = orig_init_subclass
+        # inspect.getattr_static(owner, "__init_subclass__")
+        prev_orig = [orig_init_subclass]
+        if hasattr(orig_init_subclass, "_is_patched_init_subclass"):
+            orig_init_subclass = orig_init_subclass._original_init_subclass
+            prev_orig.append(orig_init_subclass)
+        if hasattr(orig_init_subclass, "__func__"):
+            orig_init_subclass = orig_init_subclass.__func__
+            prev_orig.append(orig_init_subclass)
+            print("prev_orig", prev_orig)
 
     def _patched_init_subclass(cls, *a, **kw):
+        owner
         print("args", a)
         print("kwargs", kw)
         print("called init_subclass", cls)
+        # if isinstance(orig_init_subclass, types.BuiltinFunctionType) or isinstance(
+        #     orig_init_subclass, types.BuiltinMethodType
+        # ):
+        #     orig_init_subclass()
+        # else:
         orig_init_subclass(cls)
         _install_ga_proxy(cls)
         return
@@ -91,12 +127,20 @@ def _install_ga_proxy(owner):
         if patched_cgi is not None:
             owner.__class_getitem__ = classmethod(patched_cgi)
         # owner.__init_subclass__ = classmethod(_make_patched_init_subclass(owner))
-        owner.__init_subclass__ = classmethod(_make_patched_init_subclass(owner))
-
+        # if parent
+        # if False:
+        patched_init_subclass = _make_patched_init_subclass(owner)
+        setattr(patched_init_subclass, "_is_patched_init_subclass", True)
+        setattr(
+            patched_init_subclass,
+            "_original_init_subclass",
+            owner.__init_subclass__,
+        )
+        owner.__init_subclass__ = classmethod(patched_init_subclass)
         owner._ga_proxy_installed__ = owner
 
 
-class aliasclassmethod:
+class aliasclassmethod(classmethod):
     def __init__(self, func):
         self.func = func
         self.__name__ = getattr(func, "__name__", "aliasclassmethod")
