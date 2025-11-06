@@ -13,6 +13,12 @@ class CheckCls:
     def check(cls):
         print("checked", cls)
         assert type(cls) is not type
+        cls.check_2()
+
+    @aliasclassmethod
+    def check_2(cls):
+        print("checked 2", cls)
+        assert type(cls) is not type
 
     if Variations.has_init_subclass:
 
@@ -22,6 +28,12 @@ class CheckCls:
 
 
 class CheckPlain[T](CheckCls): ...
+
+
+# CheckPlain[int]._gaproxy_alias
+
+
+class CheckPlain2[T2](CheckPlain[T2]): ...
 
 
 class CheckBasicBaseModel[T](BaseModel):
@@ -71,6 +83,7 @@ def check_cls():
     CheckBasicBaseModel.__type_params__
     CheckBaseModel.__class_getitem__(int)
     CheckBaseModel
+    # CheckPlain2[int, float].check()
 
     CheckBaseModel[int].check()
     CheckBaseModel2[int].check()
