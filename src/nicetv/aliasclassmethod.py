@@ -52,20 +52,20 @@ def _make_patched_cgi(owner, parent):
     #     object.__class_getitem__
     # cgi = bound_cgi.__func__
 
-    def _base_cgi_bound(cls, key):
-        owner
-        # # inspect.getattr_static(owner, "__class_getitem__")
-        # bound_cgi
-        # cgi
-        # raw
-        if False:
-            bound_cgi(int)
+    # def _base_cgi_bound(cls, key):
+    #     owner
+    #     # # inspect.getattr_static(owner, "__class_getitem__")
+    #     # bound_cgi
+    #     # cgi
+    #     # raw
+    #     if False:
+    #         bound_cgi(int)
 
-        # if cgi is None:
-        #     return cls
-        return cgi(cls, key)
+    #     # if cgi is None:
+    #     #     return cls
+    #     return cgi(cls, key)
 
-    _base_cgi = _base_cgi_bound
+    _base_cgi = cgi
 
     def _patched_cgi(cls, key, _base=_base_cgi):
         print(f" called patched_cgi {owner.__name__}->{cls.__name__}[{key}]")
@@ -160,6 +160,7 @@ def _install_ga_proxy(owner):
 
 class aliasclassmethod(classmethod):
     def __init__(self, func):
+        super().__init__(func)
         self.func = func
         self.__name__ = getattr(func, "__name__", "aliasclassmethod")
         self.__doc__ = getattr(func, "__doc__")
@@ -204,7 +205,8 @@ class aliasclassmethod(classmethod):
                 owner = instance.__orig_class__
             if owner is None:
                 owner = instance.__class__
-        return types.MethodType(self.func, owner)
+        # return types.MethodType(self.func, owner)
+        return super().__get__(instance, owner)
 
 
 class _GAProxy(
