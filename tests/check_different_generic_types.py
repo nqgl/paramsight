@@ -1,24 +1,53 @@
+from typing import Any, Protocol
+
 import torch.nn as nn
-from pydantic import BaseModel
 from attrs import define
-from nicetv.mapytype import aliasclassmethod
+from pydantic import BaseModel
+
+from nicetv.aliasclassmethod import (
+    aliasclassmethod,
+    takes_alias,
+)
 
 
 class Variations:
     has_init_subclass: bool = False
 
 
+class ClassMethod(Protocol):
+    @classmethod
+    def __call__(cls: type[Any], *args: Any, **kwargs: Any) -> Any: ...
+
+
 class CheckCls:
-    @aliasclassmethod
+    @takes_alias
+    @classmethod
     def check(cls):
         print("checked", cls)
         assert type(cls) is not type
-        cls.check_2()
+        cls.check_2(2)
 
-    @aliasclassmethod
-    def check_2(cls):
+    @takes_alias
+    @classmethod
+    def check_2(cls, arg: int):
+        """
+        checking that chained aliasclassmethod decorators work
+        """
         print("checked 2", cls)
         assert type(cls) is not type
+
+    # @acm
+    # def check_3(cls):
+    #     print("checked 3", cls)
+    #     cls.check_4()
+
+    @classmethod
+    def normal_classmethod(cls):
+        print("normal classmethod", cls)
+
+    @classmethod
+    def normal_classmethod2(cls, arg: int):
+        print("normal classmethod", cls)
 
     if Variations.has_init_subclass:
 
@@ -33,7 +62,7 @@ class CheckPlain[T](CheckCls): ...
 # CheckPlain[int]._gaproxy_alias
 
 
-class CheckPlain2[T2](CheckPlain[T2]): ...
+class CheckPlain2[T1, T2](CheckPlain[T2]): ...
 
 
 class CheckBasicBaseModel[T](BaseModel):
@@ -73,18 +102,15 @@ class Simple[T]: ...
 # BaseModelWithNothing[int].__type_params__
 # BaseModelWithNothing.__parameters__
 # BaseModelWithNothing.__type_params__
-BaseModelWithNothing.__parameters__
-CheckPlain.__type_params__
-CheckPlain.__parameters__
+# BaseModelWithNothing.__parameters__
+# CheckPlain.__type_params__
+# CheckPlain.__parameters__
 
 
 def check_cls():
-    # CheckBaseModel.__init_subclass__
-    CheckBasicBaseModel.__type_params__
     CheckBaseModel.__class_getitem__(int)
     CheckBaseModel
-    # CheckPlain2[int, float].check()
-
+    CheckPlain2[int, float].check()
     CheckBaseModel[int].check()
     CheckBaseModel2[int].check()
     CheckPlain[int].check()
@@ -95,6 +121,7 @@ def check_cls():
     CheckBaseModel2[int](field=1).check()
     CheckPlain[int]().check()
     CheckAttrs[int]().check()
+    CheckPlain2[int, float]().check()
     CheckTorch[int]().check()
 
 
