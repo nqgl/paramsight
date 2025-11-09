@@ -85,15 +85,17 @@ def _is_pydantic(cls):
 
 def _is_specialized_generic(cls):
     if _is_pydantic(cls):
-        return hasattr(cls, "__pydantic_generic_metadata__")
+        return cls.__pydantic_generic_metadata__["origin"] is not None
     if isinstance(cls, typing._GenericAlias) or isinstance(cls, typing.GenericAlias):
         return True
-    return (
+    if (
         hasattr(cls, "__origin__")
         and hasattr(cls, "__args__")
         and hasattr(cls, "_inst")
         and hasattr(cls, "_name")
-    )
+    ):
+        return True
+    return False
 
 
 def _make_patched_cgi(owner, parent):
@@ -213,6 +215,38 @@ class _TakesAlias[T, **P, R]:
     # def specialize_super(cls, homecls, targetcls):
 
 
+class _TakesAlias_cm[T, **P, R](classmethod):
+    def __init__(self, func: "Callable[P, R] | classmethod[T, P, R]"):
+        if not isinstance(func, classmethod):
+            raise ValueError(
+                f"TakesAlias must wrap a classmethod, got {type(func)} for {func}"
+            )
+            # # not doing this because we can't install proxy if
+            # # we're an inner decorator
+            # self.cm = None
+            # self.__func__ = func
+        # self.cm = func
+        func.__func__._ta_ref = self
+        super().__init__(func.__func__)
+        # self._ta_ref = self
+
+    # def __call__(self, *args, **kwargs):
+    #     return self.__func__(*args, **kwargs)
+
+    def __set_name__(self, owner, name):
+        # self.cm.__set_name__(owner, name)
+        self.name = name
+        _install_ga_proxy(owner)
+
+    def __get__(self, instance, owner=None) -> Callable[P, R]:
+        if instance is not None:
+            if hasattr(instance, "__orig_class__"):
+                owner = instance.__orig_class__
+            if owner is None:
+                owner = instance.__class__
+        return super().__get__(instance, owner)
+
+
 class _TakesAlias3[T, **P, R]:
     def __init__(self, func: "Callable[P, R] | classmethod[T, P, R]"):
         if not isinstance(func, classmethod):
@@ -251,73 +285,6 @@ class _TakesAlias3[T, **P, R]:
 
     # @classmethod
     # def specialize_super(cls, homecls, targetcls):
-
-
-class tasuper(super):
-    def __init__(self, t: Any = None, obj: Any = None, /) -> None:
-        # self._this_class = None
-        self._self_cls = None
-        self._self = None
-
-        if isinstance(obj, _GAProxy):
-            orig = obj.__origin__
-        else:
-            orig = obj
-        super().__init__(t, orig)
-        # self.__thisclass__ = obj
-        self.__self__ = obj
-        self.__self_class__ = obj
-
-    # def __getattribute__(self, name: str) -> Any:
-    #     if name in ["__self__", "__self_class__", "_self", "_self_cls"]:
-    #         return super().__getattribute__(name)
-    #     raw = inspect.getattr_static(self.__self_class__, name)
-    #     if _is_aliasclassmethod(raw):
-    #         return raw.__get__(None, self.__self__)
-
-    #     return super().__getattribute__(name)
-
-    # def __getattr__(self, name):
-    #     return getattr(self.__self_class__, name)
-    #     if _is_aliasclassmethod(raw):
-    #         return raw.__get__(None, self.__self__)
-    #     return super().__getattr__(name)
-
-    @property
-    def __self__(self):
-        return self._self
-
-    @__self__.setter
-    def __self__(self, value):
-        self._self = value
-
-    @__self__.deleter
-    def __self__(self):
-        del self._self
-
-    @property
-    def __self_class__(self):
-        return self._self_cls
-
-    @__self_class__.setter
-    def __self_class__(self, value):
-        self._self_cls = value
-
-    @__self_class__.deleter
-    def __self_class__(self):
-        del self._self_cls
-
-    # @property
-    # def __thisclass__(self):
-    #     return self._this_class
-
-    # @__thisclass__.setter
-    # def __thisclass__(self, value):
-    #     self._this_class = value
-
-    # @__thisclass__.deleter
-    # def __thisclass__(self):
-    #     del self._this_class
 
 
 def _super(owner: type | None = None, obj: object | None = None, *, level: int = 0):
@@ -426,51 +393,6 @@ class wsuper:
         return got
 
 
-class _TakesAlias2[T, **P, R]:
-    def __init__(self, func: "Callable[P, R] | classmethod[T, P, R]"):
-        if not isinstance(func, classmethod):
-            raise ValueError(
-                f"TakesAlias must wrap a classmethod, got {type(func)} for {func}"
-            )
-            # # not doing this because we can't install proxy if
-            # # we're an inner decorator
-            # self.cm = None
-            # self.__func__ = func
-        self.cm = func
-        self.__func__ = func.__func__
-        self.__name__ = getattr(func, "__name__", "takes_alias")
-        self.__doc__ = func.__doc__
-        self.__wrapped__ = func
-
-    # def __call__(self, *args, **kwargs):
-    #     return self.__func__(*args, **kwargs)
-
-    def __set_name__(self, owner, name):
-        # self.cm.__set_name__(owner, name)
-        self.name = name
-        # _install_ga_proxy(owner)
-
-    def __get__(self, instance, owner=None) -> Callable[P, R]:
-        if instance is not None:
-            if hasattr(instance, "__orig_class__"):
-                owner = instance.__orig_class__
-            if owner is None:
-                owner = instance.__class__
-        if owner is not None and not _is_specialized_generic(owner):
-            new_owner = find_generic_alias_in_stack(owner)
-            if new_owner:
-                owner = new_owner
-            else:
-                find_generic_in_stack(owner)
-                extract_generic_context()
-                print()
-                2
-                current_typing_generic_for(cls, max_depth=200)
-
-        assert self.cm is not None
-        return self.cm.__get__(instance, owner)
-
-
 #     func: Callable[P, R],
 # ) -> Callable[P, R]:
 def takes_alias[**P, R](
@@ -480,7 +402,7 @@ def takes_alias[**P, R](
     newfunc = inject_locals(super=_super, _decorator_name="takes_alias")(func.__func__)
     # assert isinstance(newfunc, classmethod)
     func = classmethod(newfunc)
-    return wraps(func)(cast(Callable[P, R], _TakesAlias(func)))
+    return cast(Callable[P, R], _TakesAlias_cm(func))
 
 
 def takes_alias3[T, **P, R](
@@ -495,15 +417,19 @@ def takes_alias3[T, **P, R](
 #     return func
 
 
+def is_ta_type(obj):
+    return isinstance(obj, _TakesAlias) or isinstance(obj, _TakesAlias_cm)
+
+
 def _is_aliasclassmethod(obj):
     return (
-        isinstance(obj, _TakesAlias)
+        is_ta_type(obj)
         or isinstance(obj, aliasclassmethod)
         or getattr(obj, "_acm_takes_alias", False)
         or (
             isinstance(obj, classmethod)
             and (
-                isinstance(obj.__func__, _TakesAlias)
+                is_ta_type(obj.__func__)
                 or getattr(obj.__func__, "_acm_takes_alias", False)
             )
         )
