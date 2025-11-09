@@ -5,124 +5,250 @@ import textwrap
 import types
 import uuid
 
-_global_salt = uuid.uuid4().hex
-_global_inject_locals_name = f"inject_locals_a2a0e5bac6c14b19b51b54615cb6ec2f"
+
+def _parse_function_absolute(fn: object) -> tuple[ast.FunctionDef, ast.Module]:
+    # 1) Get source + absolute starting line
+    lines, start_line = inspect.getsourcelines(fn)  # raises OSError if unavailable
+    src = textwrap.dedent("".join(lines))
+
+    # 2) Parse, then shift all node line numbers to absolute positions
+    mod = ast.parse(src, filename=inspect.getsourcefile(fn) or "<ast>")
+    ast.increment_lineno(mod, start_line - 1)
+
+    # 3) Locate the exact def
+    fdef = next((n for n in mod.body if isinstance(n, ast.FunctionDef)), None)
+    if fdef is None or fdef.name != fn.__name__:
+        raise RuntimeError("Could not locate the function definition to rewrite.")
+    return fdef, mod
 
 
-def inject_locals_a2a0e5bac6c14b19b51b54615cb6ec2f(
+def _strip_our_decorator(fdef: ast.FunctionDef, decorator_name: str) -> None:
+    idx = -1
+    for i, dec in enumerate(fdef.decorator_list):
+        func = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(func, ast.Name) and func.id == decorator_name:
+            idx = i
+            break
+    if idx == -1:
+        raise RuntimeError("Could not locate the inject_locals decorator.")
+    fdef.decorator_list.pop(idx)
+
+
+def inject_locals(
     *,
     _decorator_name: str = "inject_locals",
     **bindings,
 ):
-    """
-    Create a new function equivalent to the original but with local assignments
-    inserted at the top of the body for the given bindings.
-
-    Example:
-        @inject_locals(debug=True)
-        def f(x):
-            if debug:
-                print("x =", x)
-            return x * 2
-    """
     inj_check_salt = uuid.uuid4().hex
     inj_check_key = f"_injected_locals{inj_check_salt}"
 
-    def check_function_already_injected(fn):
+    def check_function_already_injected(fn: object) -> bool:
         if hasattr(fn, inj_check_key):
             return True
-        setattr(fn, inj_check_key, True)
+        try:
+            setattr(fn, inj_check_key, True)
+        except Exception:
+            pass
         return False
 
-    def decorator(fn):
+    def _decorate_function(fn: types.FunctionType) -> types.FunctionType:
         if check_function_already_injected(fn):
             return fn
 
-        # Get and parse the original function source
         try:
             src = inspect.getsource(fn)
-            # if fn.__module__ == "__main__":
-            #     import __main__
-
-            #     src = inspect.getsource(__main__)
-            # inspect.getsource(fn)[-100:]
-            # inspect.getsourcelines(fn)[0][-1:]
         except OSError as e:
             raise RuntimeError("Source not available; cannot inject locals.") from e
 
         src = textwrap.dedent(src)
         mod = ast.parse(src)
-        mod.body
-        fdef = next((n for n in mod.body if isinstance(n, ast.FunctionDef)), None)
+        # fdef = next((n for n in mod.body if isinstance(n, ast.FunctionDef)), None)
+        fdef, _ = _parse_function_absolute(fn)
+
         if fdef is None or fdef.name != fn.__name__:
             raise RuntimeError("Could not locate the function definition to rewrite.")
 
-        # Stash binding objects in globals under unique names, then assign to real locals
-        new_globals = dict(fn.__globals__)
-        new_globals[inj_check_key] = True
-        salt = uuid.uuid4().hex
-        prologue: list[ast.stmt] = []
+        # Remove our decorator so the regenerated function doesn't recurse.
+        _strip_our_decorator(fdef, _decorator_name)
+        mod_globals = fn.__globals__
+        REG_NAME = "_inj_registry"
+        registry: dict[str, object] = mod_globals.setdefault(REG_NAME, {})
 
-        for local_name, obj in bindings.items():
-            gname = f"__inj_{local_name}_{salt}"
-            new_globals[gname] = obj
-            prologue.append(
-                ast.Assign(
-                    targets=[ast.Name(id=local_name, ctx=ast.Store())],
-                    value=ast.Name(id=gname, ctx=ast.Load()),
-                    lineno=fdef.body[0].lineno if fdef.body else fdef.lineno,
-                    col_offset=0,
-                )
+        # Anchor for locations (keeps tracebacks pointing to real lines)
+        anchor: ast.AST = fdef.body[0] if fdef.body else fdef
+
+        # Build prologue with absolute locations
+        reg_key = f"{fn.__qualname__}:{uuid.uuid4().hex}"
+        registry[reg_key] = dict(bindings)
+
+        prologue: list[ast.stmt] = []
+        for local_name in bindings:
+            assign = ast.Assign(
+                targets=[ast.Name(id=local_name, ctx=ast.Store())],
+                value=ast.Subscript(
+                    value=ast.Subscript(
+                        value=ast.Name(id=REG_NAME, ctx=ast.Load()),
+                        slice=ast.Constant(reg_key),
+                        ctx=ast.Load(),
+                    ),
+                    slice=ast.Constant(local_name),
+                    ctx=ast.Load(),
+                ),
             )
-        first_matched_dec = -1
-        for i, call in enumerate(fdef.decorator_list):
-            if isinstance(call, ast.Call):
-                name = call.func
-            else:
-                name = call
-            if not isinstance(name, ast.Name):
-                continue
-            if name.id == _decorator_name:
-                first_matched_dec = i
-                break
-        if first_matched_dec == -1:
-            raise RuntimeError("Could not locate the inject_locals decorator.")
-        # fdef.decorator_list[first_matched_dec] = ast.Call(
-        #     func=ast.Name(id=_global_inject_locals_name, ctx=ast.Load()),
-        #     args=[],
-        #     keywords=[],
-        # )
-        # fdef.decorator_list[0].func.id
-        fdef.decorator_list.pop(first_matched_dec)
-        # call.func._attributes
-        # call.func._field_types
-        # call.func
-        # call._field_types
-        fdef.body = prologue + fdef.body.copy()
-        new_mod = ast.Module(body=[fdef])
-        fixed_mod = ast.fix_missing_locations(new_mod)
-        # Compile a new function object
+            prologue.append(ast.copy_location(assign, anchor))
+
+        had_class_freevar = "__class__" in fn.__code__.co_freevars
+        if had_class_freevar:
+            # harmless read so the compiler emits a __class__ freevar
+            touch = ast.Expr(value=ast.Name(id="__class__", ctx=ast.Load()))
+            fdef.body.insert(0, ast.copy_location(touch, anchor))
+
+        # Prepend prologue *after* the __class__ touch (so traces still land on real lines)
+        fdef.body = prologue + fdef.body
+        fdef.decorator_list = []  # strip others; we'll rewrap later
+
+        # ---- Compile with accurate linenos ----
+        if had_class_freevar:
+            dummy_cls = ast.ClassDef(
+                name=f"__InjHost_{uuid.uuid4().hex}",
+                bases=[],
+                keywords=[],
+                body=[fdef],
+                decorator_list=[],
+            )
+            ast.copy_location(
+                dummy_cls, fdef
+            )  # class gets same starting line as the method
+            mod2 = ast.Module(body=[dummy_cls], type_ignores=[])
+        else:
+            mod2 = ast.Module(body=[fdef], type_ignores=[])
+
+        ast.fix_missing_locations(mod2)
+
         code = compile(
-            fixed_mod,
-            filename=inspect.getsourcefile(fn) or "<ast>",
+            mod2,
+            filename=inspect.getsourcefile(fn) or "<ast>",  # shows up in tracebacks
             mode="exec",
         )
         ns: dict[str, object] = {}
-        exec(
-            code,
-            new_globals,
-            ns,
+        exec(code, mod_globals, ns)
+
+        tmp = (
+            ns[dummy_cls.name].__dict__[fn.__name__]  # method inside dummy class
+            if had_class_freevar
+            else ns[fn.__name__]
         )
-        new_fn = ns[fn.__name__]
 
-        # Preserve metadata/defaults
-        if isinstance(new_fn, types.FunctionType):
+        # new_globals = dict(fn.__globals__)
+        # new_globals[inj_check_key] = True
+
+        # # Anchor for locations
+        # anchor: ast.AST = fdef.body[0] if fdef.body else fdef
+
+        # # Build prologue with locations
+        # salt = uuid.uuid4().hex
+        # prologue: list[ast.stmt] = []
+        # for local_name, obj in bindings.items():
+        #     gname = f"_inj_{local_name}_{salt}"
+        #     new_globals[gname] = obj
+
+        #     assign = ast.Assign(
+        #         targets=[ast.Name(id=local_name, ctx=ast.Store())],
+        #         value=ast.Name(id=gname, ctx=ast.Load()),
+        #         type_comment=None,
+        #     )
+        #     assign = ast.copy_location(assign, anchor)
+        #     prologue.append(assign)
+
+        # had_class_freevar = "__class__" in fn.__code__.co_freevars
+
+        # # If we need the __class__ cell, ensure the function body references it
+        # if had_class_freevar:
+        #     cls_ref = ast.Expr(value=ast.Name(id="__class__", ctx=ast.Load()))
+        #     cls_ref = ast.copy_location(cls_ref, anchor)
+        #     fdef.body.insert(0, cls_ref)
+
+        # # Prepend prologue
+        # fdef.body = prologue + fdef.body
+
+        # # We’ll compile either as a top-level function or inside a dummy class
+        # ns: dict[str, object] = {}
+        # if had_class_freevar:
+        #     # Strip any remaining decorators during the temporary compile
+        #     fdef.decorator_list = []
+
+        #     dummy_cls_name = f"_InjHost_{uuid.uuid4().hex}"
+        #     cls = ast.ClassDef(
+        #         name=dummy_cls_name,
+        #         bases=[],
+        #         keywords=[],
+        #         body=[fdef],
+        #         decorator_list=[],
+        #     )
+        #     cls = ast.copy_location(cls, fdef)  # give the class a location
+
+        #     mod2 = ast.Module(body=[cls], type_ignores=[])
+        #     ast.fix_missing_locations(mod2)
+
+        #     code = compile(
+        #         mod2,
+        #         filename=inspect.getsourcefile(fn) or "<ast>",
+        #         mode="exec",
+        #     )
+        #     exec(code, new_globals, ns)
+        #     tmp_cls = ns[dummy_cls_name]
+        #     tmp = tmp_cls.__dict__[fn.__name__]
+        # else:
+        #     fdef.decorator_list = []
+        #     mod2 = ast.Module(body=[fdef], type_ignores=[])
+        #     ast.fix_missing_locations(mod2)
+
+        #     code = compile(
+        #         mod2,
+        #         filename=inspect.getsourcefile(fn) or "<ast>",
+        #         mode="exec",
+        #     )
+        #     exec(code, new_globals, ns)
+        #     tmp = ns[fn.__name__]
+
+        # Rebuild function, preserving the original closure if needed
+        if had_class_freevar:
+            if "__class__" not in tmp.__code__.co_freevars:
+                raise RuntimeError(
+                    "Rewritten function lost the __class__ freevar; "
+                    "ensure the AST references __class__ at least once."
+                )
+            if fn.__closure__ is None:
+                raise RuntimeError(
+                    "Original function had __class__ freevar but no closure."
+                )
+            new_fn = types.FunctionType(
+                tmp.__code__,
+                mod_globals,
+                name=fn.__name__,
+                argdefs=fn.__defaults__,
+                closure=fn.__closure__,
+            )
+        else:
+            new_fn = tmp
             new_fn.__defaults__ = fn.__defaults__
-            new_fn.__kwdefaults__ = fn.__kwdefaults__
 
-        return new_fn
+        new_fn.__kwdefaults__ = fn.__kwdefaults__
+        new_fn.__annotations__ = dict(getattr(fn, "__annotations__", {}))
+        new_fn.__qualname__ = fn.__qualname__
+        return functools.update_wrapper(new_fn, fn)
+
+    def decorator(obj):
+        if isinstance(obj, classmethod):
+            inner = _decorate_function(obj.__func__)
+            return classmethod(inner)
+        if isinstance(obj, staticmethod):
+            inner = _decorate_function(obj.__func__)
+            return staticmethod(inner)
+        if isinstance(obj, types.FunctionType):
+            return _decorate_function(obj)
+        raise TypeError(
+            "@inject_locals can only decorate functions, classmethods, or staticmethods."
+        )
 
     return decorator
-
-
-inject_locals = inject_locals_a2a0e5bac6c14b19b51b54615cb6ec2f
