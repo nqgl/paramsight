@@ -1,7 +1,7 @@
 import inspect
 import typing
 
-from nicetv._is_aliasclassmethod import _is_aliasclassmethod
+from paramsight._is_aliasclassmethod import _is_aliasclassmethod
 
 _ga_fields = [
     "_inst",

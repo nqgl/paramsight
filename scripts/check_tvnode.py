@@ -4,10 +4,10 @@ import torch.nn as nn
 from attrs import define
 from pydantic import BaseModel
 
-from nicetv.aliasclassmethod import (
+from paramsight.aliasclassmethod import (
     takes_alias,
 )
-from nicetv.type_utils import get_resolved_typevars_for_base
+from paramsight.paramsight import get_resolved_typevars_for_base
 
 
 class Variations:
@@ -27,6 +27,9 @@ class CheckTVCls[T]:
 
 
 class CheckPlain[T](CheckTVCls[T]): ...
+
+
+class CheckPlainDefault[T = str](CheckTVCls[T]): ...
 
 
 class CheckPlainSuper[T](CheckTVCls[T]):
@@ -116,6 +119,8 @@ def check_cls():
     assert CheckPlainSuperDuper_1[float, str].check() == (float,)
     assert CheckPlainSuperDuper_2[float, str].check() == (str,)
 
+    assert CheckPlainDefault.check() == (str,)
+    assert CheckPlainDefault[int].check() == (int,)
     assert CheckPlainSuper[int].check() == (int,)
     assert CheckPlainSuperDuper_1[int, str].check() == (int,)
     assert CheckPlainSuperDuper_2[int, str].check() == (str,)
@@ -126,6 +131,8 @@ def check_cls():
     assert CheckBaseModel[int]().check() == (int,)
     assert CheckBaseModel2[int](field=1).check() == (int,)
     assert CheckPlain[int]().check() == (int,)
+    assert CheckPlainDefault().check() == (str,)
+    assert CheckPlainDefault[int]().check() == (int,)
     assert CheckPlainSuper[int]().check() == (int,)
     assert CheckPlainSuperDuper_1[int, str]().check() == (int,)
     assert CheckPlainSuperDuper_2[int, str]().check() == (str,)

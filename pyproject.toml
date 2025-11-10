@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nicetv"
+name = "paramsight"
 version = "0.1.0"
 description = "TODO"
 readme = "README.md"

@@ -8,7 +8,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import BaseModel
 
-from nicetv.aliasclassmethod import (
+from paramsight.aliasclassmethod import (
     _is_specialized_generic,
     takes_alias,
 )

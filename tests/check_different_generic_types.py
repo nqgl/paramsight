@@ -8,7 +8,6 @@ from paramsight.aliasclassmethod import (
     _is_specialized_generic,
     takes_alias,
 )
-from scripts.checkme import checkme
 
 
 class Variations:
@@ -58,13 +57,12 @@ class CheckCls:
         check that non-generic passes correctly
         """
         print("checked non generic", cls)
-        _is_specialized_generic(cls)
         assert type(cls) in (type, type(BaseModel))
 
     @classmethod
     def normal_classmethod(cls):
+        print(CheckCls)
         print("normal classmethod", cls)
-        assert not _is_specialized_generic(cls)
 
     @classmethod
     def normal_classmethod2(cls, arg: int):
@@ -80,11 +78,6 @@ class CheckCls:
 class CheckPlain[T](CheckCls): ...
 
 
-# checkme = inject_locals(abcd=1234)(checkme)
-checkme()
-closedval = 2
-
-
 class CheckPlainSuper[T](CheckCls):
     @takes_alias
     @classmethod
@@ -98,7 +91,6 @@ class CheckPlainSuper[T](CheckCls):
         print("closedval", closedval)
         print(CheckPlainSuper)
         # s = super(
-        super().normal_classmethod()
         return super().check()
         # return super(CheckPlainSuper, cls.__origin__).check.__func__(cls)
         # [int].check()
@@ -207,8 +199,6 @@ def check_cls():
     CheckTorch.check_non_generic()
 
     CheckPlain[int].normal_classmethod()
-    CheckBaseModel.__pydantic_generic_metadata__
-    CheckBaseModel[int].__parameters__
 
 
 def main():

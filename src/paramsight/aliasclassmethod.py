@@ -5,11 +5,11 @@ from collections.abc import Callable
 from functools import partial
 from typing import Concatenate, cast, overload
 
-from nicetv._ta_ref_attr import _TA_REF_ATTR
-from nicetv.alias_super import _super
-from nicetv.ga_proxy import _GAProxy
-from nicetv.inject_locals import inject_locals
-from nicetv.type_utils import _is_pydantic
+from paramsight._ta_ref_attr import _TA_REF_ATTR
+from paramsight.alias_super import _super
+from paramsight.ga_proxy import _GAProxy
+from paramsight.inject_locals import inject_locals
+from paramsight.type_utils import _is_pydantic
 
 
 def _is_specialized_generic(cls):

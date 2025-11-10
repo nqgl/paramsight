@@ -1,8 +1,8 @@
 import inspect
 from typing import Any
 
-from nicetv._ta_ref_attr import _TA_REF_ATTR
-from nicetv.ga_proxy import _GAProxy
+from paramsight._ta_ref_attr import _TA_REF_ATTR
+from paramsight.ga_proxy import _GAProxy
 
 
 class wsuper:  # noqa: N801

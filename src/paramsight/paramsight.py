@@ -4,7 +4,7 @@ from typing import Any, Self, get_origin
 
 from attrs import define, field
 
-from nicetv.type_utils import (
+from paramsight.type_utils import (
     TypeVar,
     _assert_is_instance,
     _get_typevar_default,

@@ -1,5 +1,5 @@
 def is_ta_type(obj):
-    from nicetv.aliasclassmethod import _TakesAlias
+    from paramsight.aliasclassmethod import _TakesAlias
 
     return isinstance(obj, _TakesAlias)
 
