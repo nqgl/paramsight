@@ -1,8 +1,9 @@
+from functools import partial
 import inspect
 import types
 import typing
 from collections.abc import Callable
-from typing import Concatenate, cast
+from typing import Concatenate, Literal, cast, overload
 
 from nicetv._ta_ref_attr import _TA_REF_ATTR
 from nicetv.alias_super import _super
@@ -102,14 +103,40 @@ class _TakesAlias[T, **P, R](classmethod):
         return super().__get__(instance, owner)
 
 
+@overload
 def takes_alias[T, **P, R](
-    fun_c: Callable[Concatenate[T, P], R],
-) -> Callable[Concatenate[T, P], R]:
+    fun_c: Callable[Concatenate[T, P], R], *, skip_super_injection: bool = False
+) -> Callable[Concatenate[T, P], R]: ...
+
+
+@overload
+def takes_alias[T, **P, R](
+    fun_c: None = None,
+    *,
+    skip_super_injection: bool = False,
+) -> Callable[[Callable[Concatenate[T, P], R]], Callable[Concatenate[T, P], R]]: ...
+
+
+def takes_alias[T, **P, R](
+    fun_c: Callable[Concatenate[T, P], R] | None = None,
+    *,
+    skip_super_injection: bool = False,
+) -> (
+    Callable[Concatenate[T, P], R]
+    | Callable[[Callable[Concatenate[T, P], R]], Callable[Concatenate[T, P], R]]
+):
+    if fun_c is None:
+        return partial(takes_alias, skip_super_injection=skip_super_injection)
+
     cm = cast(classmethod, fun_c)
     if not isinstance(cm, classmethod):
         raise ValueError(f"TakesAlias must wrap a classmethod, got {type(cm)} for {cm}")
     func = cm.__func__
-    newfunc = inject_locals(super=_super, _decorator_name="takes_alias")(func)
+    if skip_super_injection:
+        return cast(Callable[Concatenate[T, P], R], _TakesAlias(func))
+    newfunc = inject_locals(
+        super=_super, _decorator_names=["takes_alias", "classmethod"]
+    )(func)
     assert isinstance(newfunc, types.FunctionType)
     return cast(Callable[Concatenate[T, P], R], _TakesAlias(newfunc))
 
