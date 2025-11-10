@@ -5,6 +5,9 @@ import textwrap
 import types
 import uuid
 
+from typing import overload
+from collections.abc import Callable
+
 
 def _parse_function_absolute(fn: object) -> tuple[ast.FunctionDef, ast.Module]:
     # 1) Get source + absolute starting line
@@ -22,8 +25,20 @@ def _parse_function_absolute(fn: object) -> tuple[ast.FunctionDef, ast.Module]:
     return fdef, mod
 
 
-def _strip_our_decorator(fdef: ast.FunctionDef, decorator_name: str) -> None:
+def _strip_our_decorators(
+    fdef: ast.FunctionDef,
+    decorator_names: list[str] | tuple[str, ...],  # | Callable[[str], bool] ?
+) -> None:
     idx = -1
+    decorator_name = decorator_names[0]
+    fdec_names = [
+        dec.func.id
+        if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name)
+        else dec.id
+        if isinstance(dec, ast.Name)
+        else None
+        for dec in fdef.decorator_list
+    ]
     for i, dec in enumerate(fdef.decorator_list):
         func = dec.func if isinstance(dec, ast.Call) else dec
         if isinstance(func, ast.Name) and func.id == decorator_name:
@@ -31,15 +46,19 @@ def _strip_our_decorator(fdef: ast.FunctionDef, decorator_name: str) -> None:
             break
     if idx == -1:
         raise RuntimeError("Could not locate the inject_locals decorator.")
-    fdef.decorator_list.pop(idx)
-
-
-from typing import Callable, overload
+    selected_decorators = fdec_names[idx : idx + len(decorator_names)]
+    if tuple(selected_decorators) != tuple(decorator_names):
+        raise RuntimeError(
+            f"Could not locate the expceted decorators for inject_locals to remove."
+            f"expected {decorator_names}, got {selected_decorators}"
+        )
+    fdef.decorator_list = fdef.decorator_list[idx + len(decorator_names) :]
+    # fdef.decorator_list = fdef.decorator_list[idx + 1 :]
 
 
 def inject_locals(
     *,
-    _decorator_name: str = "inject_locals",
+    _decorator_names: list[str] | tuple[str, ...] = ("inject_locals",),
     **bindings,
 ):
     inj_check_salt = uuid.uuid4().hex
@@ -55,7 +74,11 @@ def inject_locals(
         return False
 
     def _decorate_function(fn: types.FunctionType) -> types.FunctionType:
-        if check_function_already_injected(fn):
+        while hasattr(fn, "__wrapped__") and not isinstance(
+            fn, classmethod | staticmethod
+        ):
+            fn = fn.__wrapped__
+        if check_function_already_injected(fn):  # TODO Remove?
             return fn
 
         try:
@@ -71,7 +94,7 @@ def inject_locals(
             raise RuntimeError("Could not locate the function definition to rewrite.")
 
         # Remove our decorator so the regenerated function doesn't recurse.
-        _strip_our_decorator(fdef, _decorator_name)
+        _strip_our_decorators(fdef, _decorator_names)
         mod_globals = fn.__globals__
         reg_name = "_inj_registry"
         registry: dict[str, object] = mod_globals.setdefault(reg_name, {})
@@ -108,7 +131,7 @@ def inject_locals(
         # Prepend prologue *after* the __class__ touch
         #   (so traces still land on real lines)
         fdef.body = prologue + fdef.body
-        fdef.decorator_list = []  # strip others; we'll rewrap later
+        # fdef.decorator_list = []  # strip others; we'll rewrap later
 
         # ---- Compile with accurate linenos ----
         if had_class_freevar:
