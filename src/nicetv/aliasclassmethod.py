@@ -1,9 +1,9 @@
-from functools import partial
 import inspect
 import types
 import typing
 from collections.abc import Callable
-from typing import Concatenate, Literal, cast, overload
+from functools import partial
+from typing import Concatenate, cast, overload
 
 from nicetv._ta_ref_attr import _TA_REF_ATTR
 from nicetv.alias_super import _super

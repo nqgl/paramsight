@@ -4,9 +4,8 @@ import inspect
 import textwrap
 import types
 import uuid
-
-from typing import overload
 from collections.abc import Callable
+from typing import overload
 
 
 def _parse_function_absolute(fn: object) -> tuple[ast.FunctionDef, ast.Module]:
