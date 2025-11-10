@@ -1,7 +1,7 @@
 
 # paramsight
 
-**Make classmethods aware of generic aliases in Python 3.13+**
+**Consistent runtime type parameter lookup + generic alias access inside classmethods**
 
 `paramsight` enables:
 - runtime type parameter lookup, located on the current class relative to some base class -- enabling consistent behavior relative to the base class even when many type parameters are used across the inheritance hierarchy. 
