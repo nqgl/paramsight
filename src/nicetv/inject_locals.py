@@ -34,6 +34,9 @@ def _strip_our_decorator(fdef: ast.FunctionDef, decorator_name: str) -> None:
     fdef.decorator_list.pop(idx)
 
 
+from typing import Callable, overload
+
+
 def inject_locals(
     *,
     _decorator_name: str = "inject_locals",
@@ -238,7 +241,15 @@ def inject_locals(
         new_fn.__qualname__ = fn.__qualname__
         return functools.update_wrapper(new_fn, fn)
 
-    def decorator(obj):
+    @overload
+    def decorator[**P, R](obj: classmethod) -> classmethod: ...
+    @overload
+    def decorator[**P, R](obj: staticmethod) -> staticmethod: ...
+    @overload
+    def decorator[**P, R](obj: Callable[P, R]) -> Callable[P, R]: ...
+    @overload
+    def decorator[**P, R](obj: object) -> object: ...
+    def decorator[**P, R](obj: object) -> object:
         if isinstance(obj, classmethod):
             inner = _decorate_function(obj.__func__)
             return classmethod(inner)
