@@ -1,9 +1,8 @@
+import inspect
 from typing import Any
+
 from nicetv._ta_ref_attr import _TA_REF_ATTR
 from nicetv.ga_proxy import _GAProxy
-
-
-import inspect
 
 
 class wsuper:

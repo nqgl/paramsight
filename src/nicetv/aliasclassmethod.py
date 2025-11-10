@@ -2,25 +2,14 @@ import inspect
 import types
 import typing
 from collections.abc import Callable
-from functools import partial, wraps
-from typing import Concatenate, Self, cast
+from typing import Concatenate, cast
 
 from pydantic import BaseModel
 
 from nicetv._ta_ref_attr import _TA_REF_ATTR
-from nicetv.ga_proxy import _GAProxy, _ga_class_fields
 from nicetv.alias_super import _super
-from nicetv.extract_from_stack_gpt5 import (
-    find_generic_alias_in_stack,
-)
+from nicetv.ga_proxy import _GAProxy
 from nicetv.inject_locals import inject_locals
-from nicetv.extract_from_stack_opus41 import extract_generic_context
-from nicetv.extract_from_stack_sonnet45 import find_generic_in_stack
-
-from types import new_class
-from typing import get_origin, get_args
-from weakref import WeakValueDictionary
-
 
 pydantic_model_metaclass = type(BaseModel)
 

@@ -1,11 +1,10 @@
 # import typing._collect_type_parameters, typing._TypingEllipsis
 
 
-from nicetv._is_aliasclassmethod import _is_aliasclassmethod
-
-
 import inspect
 import typing
+
+from nicetv._is_aliasclassmethod import _is_aliasclassmethod
 
 _ga_fields = [
     "_inst",
