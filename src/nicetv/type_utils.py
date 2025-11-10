@@ -1,21 +1,18 @@
 import typing
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from types import GenericAlias, get_original_bases
 from typing import (
     Annotated,
     Any,
-    NoDefault,
     Self,
     TypeGuard,
     TypeIs,
     TypeVar,
     get_args,
     get_origin,
-    overload,
 )
 
 from attrs import define, field
-from pydantic import BaseModel
 
 _NODEFAULT = object()
 
