@@ -1,6 +1,3 @@
-# import typing._collect_type_parameters, typing._TypingEllipsis
-
-
 import inspect
 import typing
 
@@ -28,60 +25,13 @@ _ga_fields = [
 ]
 
 
-class _GAProxy(
-    typing._GenericAlias,
-    _root=True,
+class _GAProxy(  # type:ignore
+    typing._GenericAlias,  # type:ignore[name-defined]
+    _root=True,  # type:ignore[arg-type]
 ):
-    # def __call__(self, *args, **kwargs):  # TODO maybe generic init would be nice?
-    #     return self.__origin__(*args, **kwargs)
-
-    # def __init__(self, origin, args, inst, name):
-    #     self._inst = inst
-    #     self._name = name
-    #     self.__origin__ = origin
-    #     self.__slots__ = None  # This is not documented.
-
-    #     if not isinstance(args, tuple):
-    #         args = (args,)
-    #     self.__args__ = tuple(... if a is typing._TypingEllipsis else a for a in args)
-    #     enforce_default_ordering = origin in (Generic, Protocol)
-    #     self.__parameters__ = typing._collect_type_parameters(
-    #         args,
-    #         enforce_default_ordering=enforce_default_ordering,
-    #     )
-    #     if not name:
-    #         self.__module__ = origin.__module__
-
-    # def specialize_super(self, cls):
-
-    #  I think currently it gets the _GAProxy as __orig_class__
-
-    # there are benefits to each but I'm currently leaning towards
-    # having the _GAProxy as __orig_class__
-    # will have to notice if this causes issues down the line.
-    #     # Allow C[int](...) to construct instances like C(...)
-    #     return self._gaproxy_alias(*args, **kwargs)
-    # def __new__(cls, origin, args, inst, name):
-    #     # inst = super().__new__(cls, )
-    #     if cls.__name__.startswith("_proxy"):
-    #         return super().__new__(cls)
-    #     else:
-    #         t = type(
-    #             f"_proxy{cls.__name__}{origin.__name__}[{','.join([str(a) for a in args])}]",
-    #             (
-    #                 cls,
-    #                 origin,
-    #             ),
-    #             {},
-    #         )
-    #     return t(origin, args, inst=inst, name=name)
-
-    # def __init_subclass__(cls, *args, **kwargs):
-    #     pass
-
     def __getattribute__(self, name):
         if name in _ga_fields:
-            return typing._GenericAlias.__getattribute__(self, name)
+            return typing._GenericAlias.__getattribute__(self, name)  # type:ignore[name-defined]
         origin = self.__origin__
 
         raw = inspect.getattr_static(origin, name)

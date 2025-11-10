@@ -4,27 +4,11 @@ import typing
 from collections.abc import Callable
 from typing import Concatenate, cast
 
-from pydantic import BaseModel
-
 from nicetv._ta_ref_attr import _TA_REF_ATTR
 from nicetv.alias_super import _super
 from nicetv.ga_proxy import _GAProxy
 from nicetv.inject_locals import inject_locals
-
-pydantic_model_metaclass = type(BaseModel)
-
-
-def _is_pydantic(cls):
-    return (
-        isinstance(cls, BaseModel)
-        or isinstance(cls, pydantic_model_metaclass)
-        or (
-            isinstance(cls, type)
-            and (
-                issubclass(cls, BaseModel) or issubclass(cls, pydantic_model_metaclass)
-            )
-        )
-    )
+from nicetv.type_utils import _is_pydantic
 
 
 def _is_specialized_generic(cls):

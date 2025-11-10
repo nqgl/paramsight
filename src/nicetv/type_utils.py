@@ -13,8 +13,25 @@ from typing import (
 )
 
 from attrs import define, field
+from pydantic import BaseModel
 
 _NODEFAULT = object()
+
+
+def get_args_robust(t: Any) -> tuple[Any, ...]:
+    if _is_pydantic(t):
+        if not hasattr(t, "__pydantic_generic_metadata__"):
+            return ()
+        return t.__pydantic_generic_metadata__["args"]
+    return get_args(t)
+
+
+def get_origin_robust(ga):
+    if _is_pydantic(ga):
+        if not hasattr(ga, "__pydantic_generic_metadata__"):
+            return None
+        return ga.__pydantic_generic_metadata__["origin"]
+    return get_origin(ga)
 
 
 def _is_typevar(x: Any) -> TypeGuard[TypeVar]:
@@ -28,16 +45,16 @@ def _get_typevar_default(tv: Any) -> Any:
 
 
 def _has_args_in_mro(cls: type) -> bool:
-    if get_args(cls):
+    if get_args_robust(cls):
         return True
-    if any(get_args(base) for base in get_original_bases(cls)):
+    if any(get_args_robust(base) for base in get_original_bases(cls)):
         return True
     for cl in cls.mro():
         for base in get_original_bases(cl):
-            origin = get_origin(base)
+            origin = get_origin_robust(base)
             if origin is None or not isinstance(origin, type):
                 continue
-            if get_args(base):
+            if get_args_robust(base):
                 return True
     return False
 
@@ -45,9 +62,9 @@ def _has_args_in_mro(cls: type) -> bool:
 def chill_issubclass(
     cls: type | GenericAlias, target_type: type | GenericAlias
 ) -> bool:
-    cls_t = cls if isinstance(cls, type) else typing.get_origin(cls)
+    cls_t = cls if isinstance(cls, type) else get_origin_robust(cls)
     target_t = (
-        target_type if isinstance(target_type, type) else typing.get_origin(target_type)
+        target_type if isinstance(target_type, type) else get_origin_robust(target_type)
     )
     assert isinstance(cls_t, type)
     assert isinstance(target_t, type)
@@ -56,8 +73,8 @@ def chill_issubclass(
             return True
         if isinstance(cls, type):
             return False
-        cls_t_params = typing.get_args(cls)
-        target_t_params = typing.get_args(target_type)
+        cls_t_params = typing.get_args_robust(cls)
+        target_t_params = typing.get_args_robust(target_type)
         assert len(cls_t_params) == len(target_t_params)
         results = []
         for cls_t_param, target_t_param in zip(
@@ -74,11 +91,15 @@ def chill_issubclass(
 def unwrap_annotated(param: Any) -> type:
     inner = get_origin(param)
     if inner is Annotated:
-        return unwrap_annotated(get_args(param)[0])
+        return unwrap_annotated(get_args_robust(param)[0])
     return param
 
 
 def is_generic_alias(cls: type | GenericAlias) -> TypeGuard[GenericAlias]:
+    if _is_pydantic(cls):
+        if not hasattr(cls, "__pydantic_generic_metadata__"):
+            return False
+        return cls.__pydantic_generic_metadata__["origin"] is not None
     if isinstance(cls, typing._GenericAlias):  # type: ignore
         return True
     elif isinstance(cls, GenericAlias):
@@ -96,7 +117,7 @@ def _get_typevar_subst_edges_list(cls: type) -> list[list[tuple[int, int]]]:
         [
             (src_idx, tgt_idx)
             for src_idx, param in enumerate(params)
-            for tgt_idx, t in enumerate(get_args(b))
+            for tgt_idx, t in enumerate(get_args_robust(b))
             if t is param
         ]
         for b in get_original_bases(orig)
@@ -154,7 +175,7 @@ class TypeVarTracePath:
         self, return_bound_as_fallback: bool = False
     ) -> type | GenericAlias | None:
         if self.root.ga:
-            arg = get_args(self.root.ga)[self.root_typevar_idx]
+            arg = get_args_robust(self.root.ga)[self.root_typevar_idx]
             if arg is not None:
                 if _is_typevar(arg):
                     return _get_typevar_default(arg)
@@ -299,7 +320,7 @@ class GenericAliasNode:
     @classmethod
     def make(cls, ga: GenericAlias | type) -> Self:
         if is_generic_alias(ga):
-            return cls(ga=ga, orig=TypeNode.make(get_origin(ga)))
+            return cls(ga=ga, orig=TypeNode.make(get_origin_robust(ga)))
         else:
             return cls(ga=None, orig=TypeNode.make(ga))
 
@@ -341,7 +362,8 @@ class GenericAliasNode:
                 rk = result.keys() - found.keys()
                 if rk & res_d.keys():
                     raise ValueError(
-                        f"duplicated paths found? result = {result}, keys = {keys}"
+                        f"duplicated paths found? result = {result},"
+                        " keys = {res_d.keys()}"
                     )
                 for k in rk:
                     res_d[k] = result[k]
@@ -398,3 +420,18 @@ def main(): ...
 
 if __name__ == "__main__":
     main()
+
+pydantic_model_metaclass = type(BaseModel)
+
+
+def _is_pydantic(cls):
+    return (
+        isinstance(cls, BaseModel)
+        or isinstance(cls, pydantic_model_metaclass)
+        or (
+            isinstance(cls, type)
+            and (
+                issubclass(cls, BaseModel) or issubclass(cls, pydantic_model_metaclass)
+            )
+        )
+    )

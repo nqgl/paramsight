@@ -5,7 +5,7 @@ from nicetv._ta_ref_attr import _TA_REF_ATTR
 from nicetv.ga_proxy import _GAProxy
 
 
-class wsuper:
+class wsuper:  # noqa: N801
     def __init__(self, t: Any = None, obj: Any = None):
         if isinstance(obj, _GAProxy):
             orig = obj.__origin__
@@ -30,21 +30,10 @@ def _super(
     level: int = 1,
 ):
     """
-    Return a `super(...)` bound like zero-arg `super()` from the caller's context.
-
-    - By default (`owner is None and obj is None`), it inspects the caller's frame
-      at `level` (1 = direct caller) and expects two things, just like real zero-arg super():
-        • a `__class__` cell in locals,
-        • a first positional local (usually `self` or `cls`).
-    - If `owner` and `obj` are provided, it simply returns `super(owner, obj)`.
-
-    Notes:
-      • Works inside instance methods and classmethods that were defined in a class body.
-      • Won’t work in a `staticmethod` (no first arg) or in wrappers defined outside the class
-        unless you pass `owner`/`obj` (or bump `level` to look past the wrapper that still
-        preserves the `__class__` cell in the next frame).
+    Return a `super(...)` bound like zero-arg `super()` from the caller's context
+    which handles generic aliases correctly with the takes_alias decorator.
     """
-    from builtins import super
+    # from builtins import super
 
     if owner is not None or obj is not None:
         if owner is None or obj is None:
@@ -79,7 +68,7 @@ def _super(
         try:
             owner_cls = locals_["__class__"]
         except KeyError as exc:
-            # This means the function wasn't defined in a class body (no __class__ cell).
+            # This means the function wasn't defined in a class body (no __class__ cell)
             # Using type(first_arg) here would be subtly wrong for inherited methods,
             # so we error out instead of guessing.
             raise TypeError(

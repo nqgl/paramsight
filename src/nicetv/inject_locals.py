@@ -61,7 +61,6 @@ def inject_locals(
             raise RuntimeError("Source not available; cannot inject locals.") from e
 
         src = textwrap.dedent(src)
-        mod = ast.parse(src)
         # fdef = next((n for n in mod.body if isinstance(n, ast.FunctionDef)), None)
         fdef, _ = _parse_function_absolute(fn)
 
@@ -71,8 +70,8 @@ def inject_locals(
         # Remove our decorator so the regenerated function doesn't recurse.
         _strip_our_decorator(fdef, _decorator_name)
         mod_globals = fn.__globals__
-        REG_NAME = "_inj_registry"
-        registry: dict[str, object] = mod_globals.setdefault(REG_NAME, {})
+        reg_name = "_inj_registry"
+        registry: dict[str, object] = mod_globals.setdefault(reg_name, {})
 
         # Anchor for locations (keeps tracebacks pointing to real lines)
         anchor: ast.AST = fdef.body[0] if fdef.body else fdef
@@ -87,7 +86,7 @@ def inject_locals(
                 targets=[ast.Name(id=local_name, ctx=ast.Store())],
                 value=ast.Subscript(
                     value=ast.Subscript(
-                        value=ast.Name(id=REG_NAME, ctx=ast.Load()),
+                        value=ast.Name(id=reg_name, ctx=ast.Load()),
                         slice=ast.Constant(reg_key),
                         ctx=ast.Load(),
                     ),
@@ -103,7 +102,8 @@ def inject_locals(
             touch = ast.Expr(value=ast.Name(id="__class__", ctx=ast.Load()))
             fdef.body.insert(0, ast.copy_location(touch, anchor))
 
-        # Prepend prologue *after* the __class__ touch (so traces still land on real lines)
+        # Prepend prologue *after* the __class__ touch
+        #   (so traces still land on real lines)
         fdef.body = prologue + fdef.body
         fdef.decorator_list = []  # strip others; we'll rewrap later
 
@@ -248,7 +248,7 @@ def inject_locals(
         if isinstance(obj, types.FunctionType):
             return _decorate_function(obj)
         raise TypeError(
-            "@inject_locals can only decorate functions, classmethods, or staticmethods."
+            "@inject_locals can only decorate functions, classmethods, or staticmethods"
         )
 
     return decorator
