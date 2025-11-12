@@ -105,7 +105,7 @@ class _TakesAlias[T, **P, R](classmethod):
 
 @overload
 def takes_alias[T, **P, R](
-    fun_c: Callable[Concatenate[T, P], R], *, skip_super_injection: bool = False
+    fun_c: Callable[Concatenate[T, P], R], *, patch_super: bool = False
 ) -> Callable[Concatenate[T, P], R]: ...
 
 
@@ -113,26 +113,26 @@ def takes_alias[T, **P, R](
 def takes_alias[T, **P, R](
     fun_c: None = None,
     *,
-    skip_super_injection: bool = False,
+    patch_super: bool = False,
 ) -> Callable[[Callable[Concatenate[T, P], R]], Callable[Concatenate[T, P], R]]: ...
 
 
 def takes_alias[T, **P, R](
     fun_c: Callable[Concatenate[T, P], R] | None = None,
     *,
-    skip_super_injection: bool = False,
+    patch_super: bool = False,
 ) -> (
     Callable[Concatenate[T, P], R]
     | Callable[[Callable[Concatenate[T, P], R]], Callable[Concatenate[T, P], R]]
 ):
     if fun_c is None:
-        return partial(takes_alias, skip_super_injection=skip_super_injection)
+        return partial(takes_alias, patch_super=patch_super)
 
     cm = cast(classmethod, fun_c)
     if not isinstance(cm, classmethod):
         raise ValueError(f"TakesAlias must wrap a classmethod, got {type(cm)} for {cm}")
     func = cm.__func__
-    if skip_super_injection:
+    if not patch_super:
         return cast(Callable[Concatenate[T, P], R], _TakesAlias(func))
     newfunc = inject_locals(
         super=_super, _decorator_names=["takes_alias", "classmethod"]
