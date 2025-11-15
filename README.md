@@ -61,8 +61,7 @@ class Base[T]:
         # Get the actual type parameter
         return get_resolved_typevars_for_base(cls, Base)
 
-class Derived[T](Base[T]):
-    pass
+class Derived[T](Base[T]):...
 
 # Both work correctly
 print(Base[str].get_type_info())     # (str,)
@@ -75,9 +74,9 @@ Get resolved type parameters from complex inheritance hierarchies:
 ```python
 from paramsight import get_resolved_typevars_for_base
 
-class A[T]: pass
-class B[X, Y](A[Y]): pass  
-class C[Z](B[str, Z]): pass
+class A[T]: ...
+class B[X, Y](A[Y]): ...  
+class C[Z](B[str, Z]): ...
 
 # Resolves the type parameter that flows to A
 print(get_resolved_typevars_for_base(C[int], A))  # (int,)
@@ -94,7 +93,7 @@ Written/tested for compatibility with:
 
 ## ⚠️ Super() Injection Behavior
 
-**`@takes_alias` automatically injects a custom `super` implementation into decorated methods' local scope.** This enables `super()` calls to work correctly with generic aliases but means the `super` in your method is not the built-in:
+**`@takes_alias` can automatically inject a custom `super` implementation into decorated methods' local scope.** This enables `super()` calls to work correctly with generic aliases but means the `super` in your method is not the built-in:
 ```python
 class Parent[T]:
     @takes_alias
@@ -104,7 +103,7 @@ class Parent[T]:
         return "parent"
 
 class Child[T](Parent[T]):
-    @takes_alias
+    @takes_alias(patch_super=True)
     @classmethod
     def method(cls):
         # This 'super' is NOT the built-in super!
@@ -117,7 +116,7 @@ Child[int].method()
 # Returns: "child + parent"
 ```
 
-**Why this is necessary:** Standard `super()` doesn't errors when recieving a generic alias, so we provide a compatible version that maintains the generic context through inheritance chains.
+**Why this is necessary:** Standard `super()` errors when recieving a generic alias, so we provide a compatible version that maintains the generic context through inheritance chains.
 
 The alternative looks like this:
 ```py
@@ -139,7 +138,7 @@ class C[T](Base):
 ```
 yeah, I'll pass.
 
-This can be disabled by setting the skip_super_injection flag when calling takes_alias.
+This can be enabled by setting the patch_super flag when calling takes_alias.
 
 ### Other Considerations
 
@@ -153,7 +152,7 @@ This can be disabled by setting the skip_super_injection flag when calling takes
 takes_alias
 - When `__set_name__`  is called on the decorator, the class's existing `__init_subclass__` and `__class_getitem__` are wrapped. `__init_subclass__` is wrapped to reinstall the behavior on subclasses, while `__class_getitem__` is wrapped to return a custom generic alias proxy subclass of typing._GenericAlias (except on pydantic models -- those are unmodified)
 - **Generic Alias Proxy**: Wraps generic aliases in a proxy that intercepts attribute access, checks if accessed attribute is one of the decorated takes_alias methods -- if so, pass in the proxy alias, otherwise retain normal behavior.
-- **AST Rewriting**: Modifies decorated methods to inject the custom `super` by recompiling the function with updated local variables
+- **AST Rewriting to patch `super()`**: Modifies decorated methods to inject the custom `super` by recompiling the function with updated local variables
 
 
 ### Complex Inheritance
@@ -164,8 +163,7 @@ class Multi[T1, T2]:
     def which_types(cls):
         return get_resolved_typevars_for_base(cls, Multi)
 
-class Derived[X](Multi[X, str]):
-    pass
+class Derived[X](Multi[X, str]):...
 
 print(Derived[int].which_types())  # (int, str)
 ```
@@ -184,8 +182,7 @@ print(Derived[int].which_types())  # (int, str)
 
 This library is on the edge of what's possible with Python 3.13's enhanced generics system. Use with appropriate caution in production systems.
 
-- No support for Python < 3.13
 - Requires source code access (no compiled extensions)
-- The AST rewriting approach may interact unexpectedly with other decorators that do similar transformations (possibly even just with other decorators?)
-- Nothing has been optimized for speed -- if this becomes actually relevant for anyone, please let me know.
+- The AST rewriting for patching `super()` may have unforeseen interactions.
+- Not optimized for speed -- if this becomes actually relevant for anyone, please let me know.
 
