@@ -84,7 +84,7 @@ class CheckPlain[T](CheckCls): ...
 
 
 class CheckPlainSuper[T](CheckCls):
-    @takes_alias
+    @takes_alias(patch_super=True)
     @classmethod
     def check(cls, arg=2):
         # Chained super() should still resolve to the aliased parent method
@@ -92,7 +92,7 @@ class CheckPlainSuper[T](CheckCls):
 
 
 class CheckPlainSuperDuper[T1](CheckPlainSuper[T1]):
-    @takes_alias
+    @takes_alias(patch_super=True)
     @classmethod
     def check(cls, arg=2):
         # One more hop of super()

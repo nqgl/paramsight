@@ -12,7 +12,7 @@ from attrs import define
 from pydantic import BaseModel
 
 from paramsight.aliasclassmethod import takes_alias
-from paramsight.paramsight import get_resolved_typevars_for_base
+from paramsight._paramsight import get_resolved_typevars_for_base
 
 # ---------------------------------------------------------------------------
 # Hypothesis configuration
@@ -76,21 +76,21 @@ class CheckPlain[T](CheckTVCls[T]): ...
 
 
 class CheckPlainSuper[T](CheckTVCls[T]):
-    @takes_alias
+    @takes_alias(patch_super=True)
     @classmethod
     def check(cls):
         return super().check()
 
 
 class CheckPlainSuperDuper_2[T1, T2](CheckPlainSuper[T2]):
-    @takes_alias
+    @takes_alias(patch_super=True)
     @classmethod
     def check(cls, arg=2):
         return super().check()
 
 
 class CheckPlainSuperDuper_1[T1, T2](CheckPlainSuper[T1]):
-    @takes_alias
+    @takes_alias(patch_super=True)
     @classmethod
     def check(cls, arg=2):
         return super().check()
