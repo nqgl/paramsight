@@ -1,4 +1,3 @@
-# tests/test_aliasclassmethod_hypothesis.py
 from typing import Any, Protocol
 
 import pytest

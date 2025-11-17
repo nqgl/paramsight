@@ -1,5 +1,5 @@
 import typing
-from typing import Any, Protocol
+from typing import Any, Generic, Protocol, TypeVar
 
 import torch.nn as nn
 from attrs import define
@@ -20,7 +20,15 @@ TYPE_PAIR_STRAT = st.tuples(TYPE_STRAT, TYPE_STRAT)
 DEFAULT_SETTINGS = settings(max_examples=12, deadline=None)
 
 # ---------------------------------------------------------------------------
-# Classes under test (from your snippet, lightly trimmed of prints/side effects)
+# TypeVars for old-style generics
+# ---------------------------------------------------------------------------
+
+T = TypeVar("T")
+T1 = TypeVar("T1")
+T2 = TypeVar("T2")
+
+# ---------------------------------------------------------------------------
+# Classes under test (ported to old-style generics)
 # ---------------------------------------------------------------------------
 
 
@@ -61,41 +69,41 @@ class ClassMethod(Protocol):
     def __call__(cls: type[Any], *args: Any, **kwargs: Any) -> Any: ...
 
 
-class CheckTVCls[T]:
+class CheckTVCls(Generic[T]):
     @takes_alias
     @classmethod
     def check(cls):
         return get_resolved_typevars_for_base(cls, CheckTVCls)
 
 
-class CheckPlain[T](CheckTVCls[T]): ...
+class CheckPlain(CheckTVCls[T], Generic[T]): ...
 
 
-class CheckPlainSuper[T](CheckTVCls[T]):
+class CheckPlainSuper(CheckTVCls[T], Generic[T]):
     @takes_alias(patch_super=True)
     @classmethod
     def check(cls):
         return super().check()
 
 
-class CheckPlainSuperDuper_2[T1, T2](CheckPlainSuper[T2]):
+class CheckPlainSuperDuper_2(CheckPlainSuper[T2], Generic[T1, T2]):
     @takes_alias(patch_super=True)
     @classmethod
     def check(cls, arg=2):
         return super().check()
 
 
-class CheckPlainSuperDuper_1[T1, T2](CheckPlainSuper[T1]):
+class CheckPlainSuperDuper_1(CheckPlainSuper[T1], Generic[T1, T2]):
     @takes_alias(patch_super=True)
     @classmethod
     def check(cls, arg=2):
         return super().check()
 
 
-class CheckPlain2[T1, T2](CheckPlain[T2]): ...
+class CheckPlain2(CheckPlain[T2], Generic[T1, T2]): ...
 
 
-class CheckBasicBaseModel[T](BaseModel):
+class CheckBasicBaseModel(BaseModel, Generic[T]):
     @takes_alias
     @classmethod
     def check(cls):
@@ -112,22 +120,22 @@ class NonGenericBaseModel(BaseModel):
         return get_resolved_typevars_for_base(cls, NonGenericBaseModel)
 
 
-class CheckBaseModel[T](BaseModel):
+class CheckBaseModel(BaseModel, Generic[T]):
     @takes_alias
     @classmethod
     def check(cls):
         return get_resolved_typevars_for_base(cls, CheckBaseModel)
 
 
-class CheckBaseModel2[T](BaseModel, CheckTVCls[T]):
+class CheckBaseModel2(BaseModel, CheckTVCls[T], Generic[T]):
     field: T
 
 
 @define
-class CheckAttrs[T](CheckTVCls[T]): ...
+class CheckAttrs(CheckTVCls[T], Generic[T]): ...
 
 
-class CheckTorch[T](nn.Module, CheckTVCls[T]): ...
+class CheckTorch(nn.Module, CheckTVCls[T], Generic[T]): ...
 
 
 # ---------------------------------------------------------------------------
