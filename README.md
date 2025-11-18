@@ -4,8 +4,9 @@
 **Consistent runtime type parameter lookup + generic alias access inside classmethods**
 
 `paramsight` enables:
-- runtime type parameter lookup, located on the current class relative to some base class -- enabling consistent behavior relative to the base class even when many type parameters are used across the inheritance hierarchy. 
-- in order for that to be useful, adds a decorator that makes classmethods receive the actual generic alias (e.g., `MyClass[int]`) rather than just the bare class, so that the lookup function can be used from a classmethod
+- runtime type parameter lookup (e.g. extracting the `int` from a specialized generic type `MyClass[int]`).
+  - queried relative to a given base class -- enabling consistent behavior relative to the base class even when many type parameters are used across the inheritance hierarchy.
+- in order for that to be useful, adds a decorator that makes classmethods receive the actual generic alias (e.g., `MyClass[int]`) rather than just the bare class, so that the lookup function can be used from a classmethod.
 
 ## Requirements
 
