@@ -12,6 +12,7 @@ from paramsight.type_utils import (
     get_args_robust,
     get_num_typevars,
     get_origin_robust,
+    get_parameters,
     is_generic_alias,
 )
 
@@ -71,7 +72,7 @@ class TypeVarNode:
         assert not typenode.typevars
         tv_edges = _get_typevar_subst_edges_list(typenode.cls)
         type_params: list[TypeVar] = [
-            _assert_is_instance(tv, TypeVar) for tv in typenode.cls.__type_params__
+            _assert_is_instance(tv, TypeVar) for tv in get_parameters(typenode.cls)
         ]
 
         return [
@@ -243,7 +244,7 @@ def _get_typevar_subst_edges_list(cls: type) -> list[list[tuple[int, int]]]:
         orig = get_origin(cls)
     else:
         orig = cls
-    params = orig.__type_params__
+    params = get_parameters(orig)
     return [
         [
             (src_idx, tgt_idx)

@@ -99,10 +99,30 @@ def _make_issubclass_guard[T](t: type[T]) -> Callable[[Any], TypeGuard[type[T]]]
     return guard
 
 
+def get_parameters(cls: type | GenericAlias):
+    orig = get_origin_robust(cls) or cls
+    assert isinstance(orig, type)
+    old_style_params = getattr(orig, "__parameters__", get_args_robust(cls))
+    if len(orig.__type_params__) != len(old_style_params):
+        if not old_style_params:
+            return orig.__type_params__
+        if not orig.__type_params__:
+            return old_style_params
+        raise ValueError(
+            f"""inconsistent number of parameters for {orig.__name__}: 
+            {orig.__type_params__} != {old_style_params}
+            """
+        )
+    return orig.__type_params__
+
+
 def get_num_typevars(cls: type | GenericAlias) -> int:
-    if is_generic_alias(cls):
-        cls = _assert_is_instance(get_origin_robust(cls), type)
-    return len(cls.__type_params__)
+    length = len(get_parameters(cls))
+    # if is_generic_alias(cls):
+    #     orig = _assert_is_instance(get_origin_robust(cls), type)
+    #     assert length == len(get_parameters(orig))
+
+    return length
 
 
 pydantic_model_metaclass = type(BaseModel)
