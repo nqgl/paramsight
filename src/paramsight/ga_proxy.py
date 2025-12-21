@@ -1,5 +1,6 @@
 import inspect
 import typing
+from typing import Any
 
 from paramsight._is_aliasclassmethod import _is_aliasclassmethod
 
@@ -56,6 +57,9 @@ class _GAProxy(  # type:ignore
             # acm that calls other acm fails on the second call
             return raw.__get__(None, self)
         return getattr(origin, name)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return super().__call__(*args, **kwargs)
 
 
 _ga_instance_fields = [

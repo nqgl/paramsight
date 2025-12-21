@@ -42,3 +42,5 @@ unfixable = ["B"]
 [tool.pyright]
 pythonVersion = "3.13"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/paramsight"]

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from paramsight.aliasclassmethod import (
     takes_alias,
 )
-from paramsight.paramsight import get_resolved_typevars_for_base
+from paramsight._paramsight import get_resolved_typevars_for_base
 
 
 class Variations:

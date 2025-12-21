@@ -10,6 +10,7 @@ from paramsight.alias_super import _super
 from paramsight.ga_proxy import _GAProxy
 from paramsight.inject_locals import inject_locals
 from paramsight.type_utils import _is_pydantic
+import attrs
 
 
 def _is_specialized_generic(cls):
@@ -64,10 +65,28 @@ def _make_patched_init_subclass(owner):
     return _patched_init_subclass
 
 
+# def _make_patched_init_subclass_for_attrs(owner):
+#     _orig_init_subclass = inspect.getattr_static(owner, "__attrs_init_subclass__")
+#     if hasattr(_orig_init_subclass, "__func__"):
+#         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+#             return None
+
+#     def _patched_init_subclass(cls, *a, **kw):
+#         super(owner, cls).__attrs_init_subclass__(*a, **kw)
+#         _install_ga_proxy(cls)
+#         return
+
+#     return _patched_init_subclass
+
+
 def _install_ga_proxy(owner):
     if _is_pydantic(owner):
         return
+
     if (parent := getattr(owner, "_ga_proxy_installed__", None)) != owner:
+        if "__orig_class__" not in owner.__annotations__:
+            owner.__annotations__["__orig_class__"] = type | None
+            owner.__orig_class__ = None
         patched_cgi = _make_patched_cgi(owner, parent)
         if patched_cgi is not None:
             owner.__class_getitem__ = classmethod(patched_cgi)
@@ -90,7 +109,6 @@ class _TakesAlias[T, **P, R](classmethod):
         super().__init__(func)
 
     def __set_name__(self, owner, name):
-        # self.cm.__set_name__(owner, name)
         self.name = name
         _install_ga_proxy(owner)
 

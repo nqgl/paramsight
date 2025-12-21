@@ -1,6 +1,7 @@
 import typing
 from collections.abc import Callable
 from types import GenericAlias
+import types
 from typing import (
     Annotated,
     Any,
@@ -40,6 +41,8 @@ def get_origin_robust(ga: Any) -> type | None:
         return res
     else:
         res = get_origin(ga)
+    if res is typing.Union:
+        return types.UnionType
     assert isinstance(res, type | None)
     return res
 
