@@ -2,7 +2,7 @@ import inspect
 import types
 import typing
 from collections.abc import Callable
-from functools import partial
+from functools import cache, partial
 from typing import Concatenate, cast, overload
 
 from paramsight._ta_ref_attr import _TA_REF_ATTR
@@ -10,7 +10,6 @@ from paramsight.alias_super import _super
 from paramsight.ga_proxy import _GAProxy
 from paramsight.inject_locals import inject_locals
 from paramsight.type_utils import _is_pydantic
-import attrs
 
 
 def _is_specialized_generic(cls):
@@ -42,6 +41,7 @@ def _make_patched_cgi(owner, parent):
 
     _base_cgi = cgi
 
+    @cache
     def _patched_cgi(cls, key, _base=_base_cgi):
         assert _base is _base_cgi
         alias = _base_cgi(cls, key)  # a types.GenericAlias

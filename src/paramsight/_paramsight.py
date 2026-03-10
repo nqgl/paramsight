@@ -1,4 +1,5 @@
 import typing
+from functools import cache
 from types import GenericAlias, get_original_bases
 from typing import Any, Self, get_origin
 
@@ -256,7 +257,18 @@ def _get_typevar_subst_edges_list(cls: type) -> list[list[tuple[int, int]]]:
     ]
 
 
+@cache
 def get_resolved_typevars_for_base(
+    cls: type | GenericAlias, target_base: type, return_bound_as_fallback: bool = False
+) -> tuple[type | GenericAlias | None, ...]:
+    return get_resolved_typevars_for_base_uncached(
+        cls=cls,
+        target_base=target_base,
+        return_bound_as_fallback=return_bound_as_fallback,
+    )
+
+
+def get_resolved_typevars_for_base_uncached(
     cls: type | GenericAlias, target_base: type, return_bound_as_fallback: bool = False
 ) -> tuple[type | GenericAlias | None, ...]:
     ga = GenericAliasNode.make(cls)
