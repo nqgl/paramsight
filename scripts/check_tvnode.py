@@ -4,10 +4,10 @@ import torch.nn as nn
 from attrs import define
 from pydantic import BaseModel
 
+from paramsight._paramsight import get_resolved_typevars_for_base
 from paramsight.aliasclassmethod import (
     takes_alias,
 )
-from paramsight._paramsight import get_resolved_typevars_for_base
 
 
 class Variations:

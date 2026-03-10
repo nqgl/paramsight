@@ -1,5 +1,6 @@
-from paramsight.aliasclassmethod import inject_locals
 from functools import wraps
+
+from paramsight.aliasclassmethod import inject_locals
 
 
 def dec(n):

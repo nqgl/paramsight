@@ -1,7 +1,7 @@
+import types
 import typing
 from collections.abc import Callable
 from types import GenericAlias
-import types
 from typing import (
     Annotated,
     Any,

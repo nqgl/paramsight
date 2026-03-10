@@ -1,5 +1,4 @@
 from paramsight.generic_restored_basemodel.generic_basemodel import (
-    C1,
     C2,
     GbmTest,
     GbmTest2,

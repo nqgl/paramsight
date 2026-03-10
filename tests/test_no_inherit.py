@@ -1,6 +1,5 @@
 from typing import Any, Protocol
 
-import pytest
 import torch.nn as nn
 from attrs import define
 from hypothesis import given, settings
