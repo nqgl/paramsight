@@ -120,12 +120,7 @@ def get_parameters(cls: type | GenericAlias):
 
 
 def get_num_typevars(cls: type | GenericAlias) -> int:
-    length = len(get_parameters(cls))
-    # if is_generic_alias(cls):
-    #     orig = _assert_is_instance(get_origin_robust(cls), type)
-    #     assert length == len(get_parameters(orig))
-
-    return length
+    return len(get_parameters(cls))
 
 
 pydantic_model_metaclass = type(BaseModel)
