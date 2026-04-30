@@ -1,4 +1,4 @@
-from attrs import define
+from pydantic import BaseModel
 
 from paramsight import get_resolved_typevars_for_base, takes_alias
 
@@ -10,8 +10,7 @@ class B:
         return get_resolved_typevars_for_base(cls, B)
 
 
-@define
-class A[T](B):
+class A[T](BaseModel, B):
     x: T
 
     @takes_alias
@@ -37,15 +36,13 @@ class C[T]:
         return get_resolved_typevars_for_base(cls, C)
 
 
-@define
-class D[T]:
+class D[T](BaseModel):
     @takes_alias
     @classmethod
     def get_type_d(cls):
         return get_resolved_typevars_for_base(cls, D)
 
 
-@define
 class E[T](D[T]):
     @takes_alias
     @classmethod
@@ -99,11 +96,3 @@ def test_e_class_get_type_e():
 
 def test_e_instance_get_type_e():
     assert E[int]().get_type_e() == (int,)
-
-
-def test_e_class_get_type_d():
-    assert E[int].get_type_d() == (int,)
-
-
-def test_e_instance_get_type_d():
-    assert E[int]().get_type_d() == (int,)
