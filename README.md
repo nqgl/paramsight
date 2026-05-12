@@ -13,7 +13,7 @@
 - Python 3.13 or greater (maybe works on 3.12?)
 
 ## Installation
-clone then
+Clone the repository, then
 ```bash
 pip install -e .
 ```
@@ -92,7 +92,9 @@ Written/tested for compatibility with:
 - **Plain Python classes**
 
 
-## ⚠️ Super() Injection Behavior
+## Super() Injection
+
+By default, inside a `@takes_alias` decorated method, `super()` will not work. However, `paramsight` can address this by injecting a patched `super` function. To enable this injection, use `@takes_alias(patch_super=True)`.
 
 **`@takes_alias` can automatically inject a custom `super` implementation into decorated methods' local scope.** This enables `super()` calls to work correctly with generic aliases but means the `super` in your method is not the built-in:
 ```python
@@ -119,7 +121,7 @@ Child[int].method()
 
 **Why this is necessary:** Standard `super()` errors when recieving a generic alias, so we provide a compatible version that maintains the generic context through inheritance chains.
 
-The alternative looks like this:
+The alternative would require handling the cases manually, and is ugly:
 ```py
 class Base[T]:
   @takes_alias
@@ -137,16 +139,11 @@ class C[T](Base):
     else:
       result = super(C, cls.__origin__).method(arg)
 ```
-yeah, I'll pass.
-
-This can be enabled by setting the patch_super flag when calling takes_alias.
 
 ### Other Considerations
 
-1. **Source Code Required**: The decorator needs access to source code for AST rewriting - won't work with compiled/cython extensions
-2. **Python 3.13+ Only**: Uses new generic syntax and internals introduced in Python 3.13
-3. **Performance**: Minimal overhead for class creation, but there is some introspection cost at decoration time
-4. **Threading**: The decorator modifications happen at import time and are thread-safe thereafter
+1. **Source Code Required**: The `super` injection needs to do AST rewriting and may not work with compiled/cython extensions.
+2. There may be considerations when using it in a multithreaded context.
 
 ## How It Works
 
