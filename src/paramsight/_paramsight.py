@@ -118,6 +118,41 @@ def get_resolved_typevars_for_base(
     )
 
 
+def get_args_at_base(
+    cls: type | GenericAlias,
+    target_base: type,
+    return_bound_as_fallback: bool = False,
+) -> tuple[type | GenericAlias | None, ...]:
+    return get_resolved_typevars_for_base(cls, target_base, return_bound_as_fallback)
+
+
+def get_typevar_value(
+    cls: type | GenericAlias,
+    target_base: type,
+    typevar: TypeVar,
+    return_bound_as_fallback: bool = False,
+) -> Any:
+    """Resolve a single, named typevar of ``target_base`` as seen from ``cls``.
+
+    Where :func:`get_args_at_base` returns all of ``target_base``'s args
+    positionally, this looks one up by TypeVar identity. Returns the resolved
+    value (a type, a generic alias, or ``typing.NoDefault`` when the typevar is
+    unspecialized and has no default).
+
+    This is the untyped escape hatch; for a statically-typed surface, see
+    :class:`paramsight.TypeVarValue`.
+    """
+    params = list(get_parameters(target_base))
+    try:
+        idx = params.index(typevar)
+    except ValueError:
+        raise ValueError(
+            f"{typevar!r} is not a typevar of {target_base!r}; "
+            f"its typevars are {params}"
+        ) from None
+    return get_args_at_base(cls, target_base, return_bound_as_fallback)[idx]
+
+
 def get_resolved_typevars_for_base_uncached(
     cls: type | GenericAlias,
     target_base: type,
