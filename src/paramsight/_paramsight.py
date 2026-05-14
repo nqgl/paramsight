@@ -90,9 +90,16 @@ def _resolve(
     subs = _build_subs(origin, args, return_bound_as_fallback)
 
     if origin is target_base:
+        params = get_parameters(target_base)
+        # Builtin generics (list, dict, tuple, collections.abc.*, ...) don't
+        # expose their type parameters via __type_params__/__parameters__, so
+        # ``params`` is empty even though we arrived via e.g. ``list[list[T]]``.
+        # In that case fall back to the (already-substituted) args we walked to.
+        if not params and args:
+            return args
         return tuple(
             subs[p] if _is_typevar(p) and p in subs else p
-            for p in get_parameters(target_base)
+            for p in params
         )
 
     for base in get_original_bases(origin):

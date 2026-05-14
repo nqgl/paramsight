@@ -18,68 +18,39 @@ Clone the repository, then
 pip install -e .
 ```
 
-## Examples
-
-### Resolving a type parameter from a classmethod
-
-```python
-from paramsight import takes_alias, get_args_at_base
-
-class Container[T]:
-    @takes_alias
-    @classmethod
-    def describe(cls):
-        print(f"I am {cls}")          # cls is the actual Container[int], not just Container
-
-    @takes_alias
-    @classmethod
-    def get_contained_type(cls):
-        # searches relative to the given base (Container), so subclasses still get the right answer
-        return get_args_at_base(cls, Container)
-
-Container[int].describe()                              # I am Container[int]
-assert Container[int].get_contained_type() == (int,)
-assert Container[int]().get_contained_type() == (int,) # works on instances too
-```
-
-### `get_args_at_base` vs `typing.get_args`
-
-`typing.get_args` only sees the *immediate* alias's arguments. `get_args_at_base` walks the inheritance hierarchy and substitutes — so it can answer "what is *this* base parameterized with, here?":
+## Example
 
 ```python
 from typing import get_args
-from paramsight import get_args_at_base
-
-class NestedList[T](list[list[T]]): ...
-
-# typing.get_args only sees NestedList[int]'s own arg:
-assert get_args(NestedList[int]) == (int,)
-
-# paramsight can resolve against any base in the hierarchy:
-assert get_args_at_base(NestedList[int], list) == (list[int],)   # what `list` is parameterized with
-assert get_args_at_base(NestedList[int], NestedList) == (int,)    # NestedList's own typevar
-```
-
-### A typed accessor for a class's typevar (`TypeVarValue`)
-
-```python
-from paramsight import TypeVarValue
+from paramsight import takes_alias, get_args_at_base, TypeVarValue
 
 class Box[T]:
+    # a typed accessor — statically `type[T]`
     value_type = TypeVarValue[T]()
 
-assert Box[int].value_type is int      # statically: type[int]
-assert Box[str].value_type is str
+    # @takes_alias makes `cls` the actual alias (Box[int]), not the bare Box
+    @takes_alias
+    @classmethod
+    def contained_type(cls):
+        # resolved relative to a base, so subclasses get the right answer too
+        return get_args_at_base(cls, Box)
 
-class NumberBox(Box[int]): ...
-assert NumberBox.value_type is int     # inherited, still resolves correctly
+assert Box[int].value_type is int                # via the descriptor (statically: type[int])
+assert Box[int].contained_type() == (int,)       # via the classmethod
+assert Box[int]().contained_type() == (int,)     # works on instances
+
+class IntBox(Box[int]): ...
+assert IntBox.value_type is int                  # inherited, still resolves correctly
+
+# get_args_at_base resolves against ANY base in the hierarchy — not just the
+# immediate alias, which is all typing.get_args can see:
+class NestedList[T](list[list[T]]): ...
+assert get_args(NestedList[int]) == (int,)                       # typing.get_args can't tell you about `list`'s args here
+assert get_args_at_base(NestedList[int], list) == (list[int],)   # ...but paramsight can
+assert get_args_at_base(NestedList[int], NestedList) == (int,)   # (and NestedList's own typevar)
 ```
 
-This approach is convienent, and has the benefit of being fully understood by type checkers (at least Pylance).
-- e.g., checker knows `isinstance(obj, box.value_type)` implies `obj` is a `T`!
-
-
-(See the dedicated `TypeVarValue` section below for more details.)
+`TypeVarValue` is fully understood by type checkers (at least Pylance) — e.g. a checker knows `isinstance(obj, box.value_type)` narrows `obj` to that box's element type. See the dedicated `TypeVarValue` section below for the details, caveats, and the pydantic note. Unfortunately, this can't level of typing information isn't achievable with `get_args_at_base`.
 
 ## Features
 

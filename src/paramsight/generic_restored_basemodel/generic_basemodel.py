@@ -1,9 +1,15 @@
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, GetCoreSchemaHandler, computed_field, model_serializer
+from pydantic import (
+    BaseModel,
+    ValidationInfo,
+    computed_field,
+    model_serializer,
+    model_validator,
+)
 from pydantic.functional_serializers import SerializerFunctionWrapHandler
-from pydantic_core import PydanticCustomError, core_schema
+from pydantic_core import PydanticCustomError
 
 from paramsight import get_resolved_typevars_for_base, takes_alias
 from paramsight.generic_restored_basemodel.typeref import TypeRef
@@ -80,44 +86,23 @@ class GenericBaseModel(BaseModel):
         alias = cls.__class_getitem__(tvs)
         return alias, value
 
+    @model_validator(mode="wrap")
     @classmethod
-    def __get_pydantic_core_schema__(
-        cls,
-        source: type[Any],
-        handler: GetCoreSchemaHandler,
-    ) -> core_schema.CoreSchema:
+    def _dispatch_to_specialized_alias(
+        cls, value: Any, handler: Any, info: ValidationInfo
+    ) -> Any:
+        """Make the *unspecialized* GenericBaseModel dispatch to the right
+        ``GenericBaseModel[...]`` based on the carried ``generic_type`` info.
+
+        Specialized aliases and non-generic subclasses validate normally — only
+        the bare generic model needs to dispatch.
         """
-        Customize validation so that the *unspecialized* GenericModel
-        dynamically dispatches to GenericModel[...].
-
-        Specialized aliases (GenericModel[int], etc.) keep the default schema.
-        """
-        # If this is already a specialized alias like GenericModel[int],
-        # just generate the normal schema.
-        if is_generic_alias(cls):
-            return handler(source)
-
-        # For the bare GenericModel, we wrap the default schema with a dispatcher.
-        inner_schema = handler(source)
-
-        def dispatch(
-            value: Any,
-            validator: core_schema.ValidatorFunctionWrapHandler,
-        ) -> Any:
-            alias, normalized = cls._select_specialized_alias(value)
-            if alias is cls:
-                # Use the "base" schema for GenericModel itself.
-                # `validator` validates using `inner_schema`.
-                return validator(normalized)
-
-            # Delegate to the specialized alias's validator.
-            # This preserves all strict/extra/from_attributes/context handling.
-            return alias.__pydantic_validator__.validate_python(normalized)
-
-        return core_schema.no_info_wrap_validator_function(
-            dispatch,
-            inner_schema,
-        )
+        if is_generic_alias(cls) or get_num_typevars(cls) == 0:
+            return handler(value)
+        alias, normalized = cls._select_specialized_alias(value)
+        if alias is cls:
+            return handler(normalized)
+        return alias.model_validate(normalized, context=info.context)
 
 
 class C1(GenericBaseModel):
