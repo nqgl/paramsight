@@ -1,7 +1,7 @@
 import typing
 from typing import Any, Generic, Protocol, TypeVar
 
-import torch.nn as nn
+import pytest
 from attrs import define
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -9,6 +9,9 @@ from pydantic import BaseModel
 
 from paramsight._paramsight import get_args_at_base
 from paramsight.aliasclassmethod import takes_alias
+
+# torch is an optional compat target; skip this module if it isn't installed.
+nn = pytest.importorskip("torch.nn")
 
 # ---------------------------------------------------------------------------
 # Hypothesis configuration

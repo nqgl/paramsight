@@ -32,6 +32,12 @@ dev = [
     "ruff>=0.14.3",
     "pyright>=1.1.400",
     "hypothesis>=6.0.0",
+    "attrs>=23.2.0",
+]
+# Optional compat target. Heavy; not installed in CI — the torch tests
+# self-skip via pytest.importorskip when it's absent.
+torch = [
+    "torch",
 ]
 
 

@@ -1,6 +1,6 @@
 from typing import Any, Protocol
 
-import torch.nn as nn
+import pytest
 from attrs import define
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -11,6 +11,9 @@ from paramsight.aliasclassmethod import (
     _is_specialized_generic,
     takes_alias,
 )
+
+# torch is an optional compat target; skip this module if it isn't installed.
+nn = pytest.importorskip("torch.nn")
 
 # ---------------------------------------------------------------------------
 # Test fixtures / helpers
