@@ -1,90 +1,35 @@
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, GetCoreSchemaHandler, computed_field
-from pydantic_core import PydanticCustomError, core_schema
+from pydantic import (
+    BaseModel,
+    ValidationInfo,
+    computed_field,
+    model_serializer,
+    model_validator,
+)
+from pydantic_core import PydanticCustomError
+from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
-from paramsight import get_resolved_typevars_for_base, takes_alias
+from paramsight import get_args_at_base, takes_alias
 from paramsight.generic_restored_basemodel.typeref import TypeRef
 from paramsight.type_utils import get_num_typevars, get_origin_robust, is_generic_alias
 
-# keyname = "_gbm_type_parameter_info"
 
+def _origin_issubclass(value: Any, base: Any) -> bool:
+    """``issubclass`` that tolerates generic aliases without raising.
 
-# class GenericModel(BaseModel):
-#     @computed_field
-#     @property
-#     def _gbm_type_parameter_info(self) -> tuple[TypeRef, ...]:
-#         return tuple(TypeRef.from_ga(t) for t in self._gbm_get_generic_type())
-
-#     assert _gbm_type_parameter_info.__name__ == keyname
-
-#     @classmethod
-#     def _gbm_get_generic_type(cls):
-#         return get_resolved_typevars_for_base(cls, get_origin_robust(cls) or cls)
-
-#     @classmethod
-#     def model_validate_json(
-#         cls,
-#         json_data: str | bytes | bytearray,
-#         *,
-#         strict: bool | None = None,
-#         extra: None | Literal["allow"] | Literal["ignore"] | Literal["forbid"] = None,
-#         context: Any | None = None,
-#         by_alias: bool | None = None,
-#         by_name: bool | None = None,
-#     ) -> Self:
-#         pass
-
-#     @classmethod
-#     def _gbm_specialize_from_object(cls, obj: Any):
-#         tvs = tuple(TypeRef.model_validate(tv).get() for tv in obj[keyname])
-#         if len(tvs) == 0:
-#             return cls
-#         return cls.__class_getitem__(tvs)
-
-#     @classmethod
-#     def model_validate(
-#         cls,
-#         obj: Any,
-#         *,
-#         strict: bool | None = None,
-#         extra: None | Literal["allow"] | Literal["ignore"] | Literal["forbid"] = None,
-#         from_attributes: bool | None = None,
-#         context: Any | None = None,
-#         by_alias: bool | None = None,
-#         by_name: bool | None = None,
-#     ) -> Self:
-#         if is_generic_alias(cls):
-#             return super().model_validate(
-#                 obj,
-#                 strict=strict,
-#                 extra=extra,
-#                 from_attributes=from_attributes,
-#                 context=context,
-#                 by_alias=by_alias,
-#                 by_name=by_name,
-#             )
-#         tvs = tuple(TypeRef.model_validate(tv).get() for tv in obj["generic_type"])
-#         if len(tvs) == 0:
-#             return super().model_validate(
-#                 obj,
-#                 strict=strict,
-#                 extra=extra,
-#                 from_attributes=from_attributes,
-#                 context=context,
-#                 by_alias=by_alias,
-#                 by_name=by_name,
-#             )
-#         return cls.__class_getitem__(tvs).model_validate(
-#             obj,
-#             strict=strict,
-#             extra=extra,
-#             from_attributes=from_attributes,
-#             context=context,
-#             by_alias=by_alias,
-#             by_name=by_name,
-#         )
+    Both operands are reduced to their unsubscripted origin (so ``list[int]``
+    is compared as ``list``). This is a *validation* check on possibly-hostile
+    deserialized type info, so it fails **closed**: if a meaningful class
+    comparison can't be made, return ``False`` and let the caller reject it
+    rather than waving it through.
+    """
+    value = get_origin_robust(value) or value
+    base = get_origin_robust(base) or base
+    if isinstance(value, type) and isinstance(base, type):
+        return issubclass(value, base)
+    return False
 
 
 class GenericBaseModel(BaseModel):
@@ -93,24 +38,48 @@ class GenericBaseModel(BaseModel):
     @computed_field
     @property
     def generic_type(self) -> tuple[TypeRef, ...]:
-        return tuple(TypeRef.from_ga(t) for t in self.get_generic_type())
+        return tuple(TypeRef.from_ga(t) for t in self.get_type_parameters())
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_generic_type(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        data = handler(self)
+        if isinstance(data, dict) and not data.get(self._GENERIC_KEY):
+            data.pop(self._GENERIC_KEY, None)
+        return data
 
     @takes_alias
     @classmethod
-    def get_generic_type(cls):
-        return get_resolved_typevars_for_base(cls, get_origin_robust(cls) or cls)
+    def get_type_parameters(cls):
+        return get_args_at_base(cls, get_origin_robust(cls) or cls)
 
+    @takes_alias
     @classmethod
     def _select_specialized_alias(
         cls,
         value: Any,
-    ) -> tuple[type["GenericBaseModel"], Any]:
-        if get_num_typevars(cls) == 0 or is_generic_alias(cls):
+    ) -> tuple[Any, Any]:
+        """Pick the model to validate ``value`` against.
+
+        Returns ``(target, value)``. ``target`` is a ``GenericBaseModel``
+        (sub)class or a parameterized alias of one — typed ``Any`` because it
+        spans pydantic-generated specialization classes and typing aliases,
+        which have no common static type. If ``target is cls`` the caller
+        validates normally; otherwise it delegates to
+        ``target.model_validate``.
+        """
+        if get_num_typevars(cls) == 0:
             return cls, value
+        ga_params = None
+        if is_generic_alias(cls):
+            ga_params = cls.get_type_parameters()
         if isinstance(value, GenericBaseModel):
             return type(value), value
 
         if not isinstance(value, Mapping):
+            if ga_params is not None:
+                return cls, value
             raise PydanticCustomError(
                 "generic_model_type",
                 "GenericModel expects a mapping when deserializing unspecialized type",
@@ -118,59 +87,51 @@ class GenericBaseModel(BaseModel):
         try:
             raw_tvs = value[cls._GENERIC_KEY]
         except KeyError:
-            # No generic_type key: either treat as "unspecialized" or error
-            # raise PydanticCustomError(
-            #     "generic_model_type",
-            #     "GenericModel expects a mapping with a generic_type key"
-            #     " when deserializing unspecialized type",
-            # ) from e
             return cls, value
 
         tvs = tuple(TypeRef.model_validate(tv).get() for tv in raw_tvs)
         if not tvs:
             return cls, value
+        if ga_params is not None:
+            if len(tvs) != len(ga_params):
+                raise PydanticCustomError(
+                    "generic_model_type",
+                    "GenericModel expects {expected} type arguments, got {actual}",
+                    {"expected": len(ga_params), "actual": len(tvs)},
+                )
+            if not all(  # assuming covariance? not clear if this is best
+                _origin_issubclass(tv, param)
+                for tv, param in zip(tvs, ga_params, strict=True)
+            ):
+                raise PydanticCustomError(
+                    "generic_model_type",
+                    "GenericModel expects type arguments to be subclasses "
+                    "of {expected}",
+                    {"expected": ga_params},
+                )
 
-        alias = cls.__class_getitem__(tvs)
+        # tvs are runtime-resolved types/aliases; the checker can't model
+        # dynamic pydantic specialization here.
+        alias = cls.__class_getitem__(tvs)  # pyright: ignore[reportArgumentType]
         return alias, value
 
+    @model_validator(mode="wrap")
     @classmethod
-    def __get_pydantic_core_schema__(
-        cls,
-        source: type[Any],
-        handler: GetCoreSchemaHandler,
-    ) -> core_schema.CoreSchema:
+    def _dispatch_to_specialized_alias(
+        cls, value: Any, handler: Any, info: ValidationInfo
+    ) -> Any:
+        """Make the *unspecialized* GenericBaseModel dispatch to the right
+        ``GenericBaseModel[...]`` based on the carried ``generic_type`` info.
+
+        Specialized aliases and non-generic subclasses validate normally — only
+        the bare generic model needs to dispatch.
         """
-        Customize validation so that the *unspecialized* GenericModel
-        dynamically dispatches to GenericModel[...].
-
-        Specialized aliases (GenericModel[int], etc.) keep the default schema.
-        """
-        # If this is already a specialized alias like GenericModel[int],
-        # just generate the normal schema.
-        if is_generic_alias(cls):
-            return handler(source)
-
-        # For the bare GenericModel, we wrap the default schema with a dispatcher.
-        inner_schema = handler(source)
-
-        def dispatch(
-            value: Any,
-            validator: core_schema.ValidatorFunctionWrapHandler,
-        ) -> Any:
-            alias, normalized = cls._select_specialized_alias(value)
-            if alias is cls:
-                # Use the "base" schema for GenericModel itself.
-                # `validator` validates using `inner_schema`.
-                return validator(normalized)
-
-            # Delegate to the specialized alias's validator.
-            # This preserves all strict/extra/from_attributes/context handling.
-            return alias.__pydantic_validator__.validate_python(normalized)
-
-        return core_schema.no_info_wrap_validator_function(
-            dispatch,
-            inner_schema,
-        )
+        if is_generic_alias(cls) or get_num_typevars(cls) == 0:
+            return handler(value)
+        alias, normalized = cls._select_specialized_alias(value)
+        if alias is cls:
+            return handler(normalized)
+        return alias.model_validate(normalized, context=info.context)
 
 
 class C1(GenericBaseModel):

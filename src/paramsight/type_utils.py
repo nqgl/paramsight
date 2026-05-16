@@ -1,3 +1,4 @@
+import types
 import typing
 from collections.abc import Callable
 from types import GenericAlias
@@ -7,6 +8,7 @@ from typing import (
     TypeGuard,
     TypeIs,
     TypeVar,
+    cast,
     get_args,
     get_origin,
 )
@@ -40,6 +42,10 @@ def get_origin_robust(ga: Any) -> type | None:
         return res
     else:
         res = get_origin(ga)
+    if res is typing.Union:
+        # `types.UnionType` is the runtime origin of `X | Y`; it's a class,
+        # but pyright won't narrow type[UnionType] to `type` (it's @final).
+        return cast(type, types.UnionType)
     assert isinstance(res, type | None)
     return res
 
@@ -117,12 +123,7 @@ def get_parameters(cls: type | GenericAlias):
 
 
 def get_num_typevars(cls: type | GenericAlias) -> int:
-    length = len(get_parameters(cls))
-    # if is_generic_alias(cls):
-    #     orig = _assert_is_instance(get_origin_robust(cls), type)
-    #     assert length == len(get_parameters(orig))
-
-    return length
+    return len(get_parameters(cls))
 
 
 pydantic_model_metaclass = type(BaseModel)

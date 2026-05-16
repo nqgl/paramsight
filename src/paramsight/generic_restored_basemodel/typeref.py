@@ -1,11 +1,14 @@
 import importlib
 import inspect
+import types
+import warnings
 from types import FunctionType
 from typing import Self
 
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
-from paramsight import get_resolved_typevars_for_base
+from paramsight import get_args_at_base, takes_alias
+from paramsight.type_utils import get_origin_robust
 
 
 def get_src(obj):
@@ -15,9 +18,9 @@ def get_src(obj):
     return inspect.getsource(module)
 
 
-class ObjRef(BaseModel):
+class ObjRef[T = object](BaseModel):
     module: str
-    cls_name: str
+    obj_name: str = Field(validation_alias=AliasChoices("cls_name", "obj_name"))
     source_backup: str | None = None
 
     @classmethod
@@ -32,35 +35,54 @@ class ObjRef(BaseModel):
         if test_obj is not o and not dynamic_okay:
             raise ValueError(
                 f"cannot safe ref to {o}: test-imported object is not"
-                f" same as the original: {test_obj} != {o}"
+                f" the same object as the original: {test_obj} is not {o}"
+                + ("\nhowever, they are equal" if test_obj == o else "")
+                + "\nthis can be ignored by passing"
+                + " dynamic_okay=True to ObjRef.from_obj()"
             )
-        return cls(module=module, cls_name=name, source_backup=source_backup)
+        return cls(module=module, obj_name=name, source_backup=source_backup)
 
-    def get_obj(self, strict: bool = False):
+    @takes_alias
+    @classmethod
+    def get_t(cls) -> type[T]:
+        (t,) = get_args_at_base(cls, ObjRef)
+        return t  # type: ignore
+
+    def get_obj(self, strict: bool = False) -> T:
         module = importlib.import_module(self.module)
-        obj = getattr(module, self.cls_name)
+        obj = getattr(module, self.obj_name)
         if get_src(obj) != self.source_backup:
-            print(
-                """
-                warning: loaded architecture source code appears to have changed since the model was saved. 
-                This may cause issues.
-                (but not necessarily)
-                """
+            warnings.warn(
+                f"loaded source code for {self.obj_name!r} appears to have "
+                f"changed since this model was serialized",
+                stacklevel=2,
             )
             if strict:
                 raise ValueError(
-                    "loaded architecture source code has changed since this model was saved"
+                    "loaded object source code has changed since this model was saved"
                 )
+        t = self.get_t()
+
+        if get_origin_robust(t) is type:
+            import typing
+
+            # type_t = get_args_at_base(t, type)
+            (type_t,) = typing.get_args(t)
+            valid = issubclass(obj, type_t)
+        else:
+            valid = isinstance(obj, t)
+        if not valid:
+            raise ValueError(f"loaded object is not of type {self.get_t()}: {obj}")
         return obj
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}(module={self.module}, cls_name={self.cls_name})"
+            f"{self.__class__.__name__}(module={self.module}, cls_name={self.obj_name})"
         )
 
 
 class TypeRef(BaseModel):
-    base: ObjRef
+    base: ObjRef[type]
     params: "tuple[TypeRef, ...] | None" = None
 
     @classmethod
@@ -72,15 +94,15 @@ class TypeRef(BaseModel):
         assert (base is None) == (len(args) == 0)
         if base is None:
             assert isinstance(ga, type)
-            return cls(base=ObjRef.from_obj(ga), params=None)
-        arg_values = get_resolved_typevars_for_base(ga, base)
+            return cls(base=ObjRef[type].from_obj(ga), params=None)
+        arg_values = get_args_at_base(ga, base)
         return cls(
-            base=ObjRef.from_obj(base),
+            base=ObjRef[type].from_obj(base),
             params=tuple(cls.from_ga(arg_value) for arg_value in arg_values),
         )
 
-    def get(self):
+    def get(self) -> type | types.GenericAlias:
         if self.params is None:
             return self.base.get_obj()
         params = tuple(param.get() for param in self.params)
-        return self.base.get_obj()[*params]
+        return self.base.get_obj()[*params]  # type: ignore # should be a generic type if it has params

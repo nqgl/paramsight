@@ -1,9 +1,10 @@
 import inspect
 import typing
+from typing import Any
 
 from paramsight._is_aliasclassmethod import _is_aliasclassmethod
 
-_ga_fields = [
+_generic_alias_fields = [
     "_inst",
     "_name",
     "__origin__",
@@ -30,7 +31,7 @@ class _GAProxy(  # type:ignore
     _root=True,  # type:ignore[arg-type]
 ):
     def __getattribute__(self, name):
-        if name in _ga_fields:
+        if name in _generic_alias_fields:
             return typing._GenericAlias.__getattribute__(self, name)  # type:ignore[name-defined]
         origin = self.__origin__
 
@@ -57,26 +58,5 @@ class _GAProxy(  # type:ignore
             return raw.__get__(None, self)
         return getattr(origin, name)
 
-
-_ga_instance_fields = [
-    "_inst",
-    "_name",
-    "__origin__",
-    "__args__",
-    "__parameters__",
-]
-_ga_class_fields = [
-    "__call__",
-    "__mro_entries__",
-    "__getattr__",
-    "__dir__",
-    "__getitem__",
-    "_determine_new_args",
-    "_make_substitution",
-    "copy_with",
-    "__repr__",
-    "__reduce__",
-    "__mro_entries__",
-    "__iter__",
-    # "__slots__",
-]
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return super().__call__(*args, **kwargs)

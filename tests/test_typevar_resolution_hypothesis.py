@@ -1,14 +1,17 @@
 import typing
 from typing import Any, Protocol
 
-import torch.nn as nn
+import pytest
 from attrs import define
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import BaseModel
 
-from paramsight._paramsight import get_resolved_typevars_for_base
+from paramsight._paramsight import get_args_at_base
 from paramsight.aliasclassmethod import takes_alias
+
+# torch is an optional compat target; skip this module if it isn't installed.
+nn = pytest.importorskip("torch.nn")
 
 # ---------------------------------------------------------------------------
 # Hypothesis configuration
@@ -65,7 +68,7 @@ class CheckTVCls[T]:
     @takes_alias
     @classmethod
     def check(cls):
-        return get_resolved_typevars_for_base(cls, CheckTVCls)
+        return get_args_at_base(cls, CheckTVCls)
 
 
 class CheckPlain[T](CheckTVCls[T]): ...
@@ -109,14 +112,14 @@ class NonGenericBaseModel(BaseModel):
     @takes_alias
     @classmethod
     def check(cls):
-        return get_resolved_typevars_for_base(cls, NonGenericBaseModel)
+        return get_args_at_base(cls, NonGenericBaseModel)
 
 
 class CheckBaseModel[T](BaseModel):
     @takes_alias
     @classmethod
     def check(cls):
-        return get_resolved_typevars_for_base(cls, CheckBaseModel)
+        return get_args_at_base(cls, CheckBaseModel)
 
 
 class CheckBaseModel2[T](BaseModel, CheckTVCls[T]):

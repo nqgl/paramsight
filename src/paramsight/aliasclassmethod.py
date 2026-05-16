@@ -2,7 +2,8 @@ import inspect
 import types
 import typing
 from collections.abc import Callable
-from functools import partial
+from functools import cache, partial
+from types import GenericAlias
 from typing import Concatenate, cast, overload
 
 from paramsight._ta_ref_attr import _TA_REF_ATTR
@@ -15,7 +16,10 @@ from paramsight.type_utils import _is_pydantic
 def _is_specialized_generic(cls):
     if _is_pydantic(cls):
         return cls.__pydantic_generic_metadata__["origin"] is not None
-    if isinstance(cls, typing._GenericAlias) or isinstance(cls, typing.GenericAlias):
+    if isinstance(
+        cls,
+        typing._GenericAlias,  # type:ignore[attr-defined]
+    ) or isinstance(cls, GenericAlias):
         return True
     if (
         hasattr(cls, "__origin__")
@@ -41,6 +45,7 @@ def _make_patched_cgi(owner, parent):
 
     _base_cgi = cgi
 
+    @cache
     def _patched_cgi(cls, key, _base=_base_cgi):
         assert _base is _base_cgi
         alias = _base_cgi(cls, key)  # a types.GenericAlias
@@ -64,10 +69,28 @@ def _make_patched_init_subclass(owner):
     return _patched_init_subclass
 
 
+# def _make_patched_init_subclass_for_attrs(owner):
+#     _orig_init_subclass = inspect.getattr_static(owner, "__attrs_init_subclass__")
+#     if hasattr(_orig_init_subclass, "__func__"):
+#         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+#             return None
+
+#     def _patched_init_subclass(cls, *a, **kw):
+#         super(owner, cls).__attrs_init_subclass__(*a, **kw)
+#         _install_ga_proxy(cls)
+#         return
+
+#     return _patched_init_subclass
+
+
 def _install_ga_proxy(owner):
     if _is_pydantic(owner):
         return
+
     if (parent := getattr(owner, "_ga_proxy_installed__", None)) != owner:
+        if "__orig_class__" not in owner.__annotations__:
+            owner.__annotations__["__orig_class__"] = type | None
+            owner.__orig_class__ = None
         patched_cgi = _make_patched_cgi(owner, parent)
         if patched_cgi is not None:
             owner.__class_getitem__ = classmethod(patched_cgi)
@@ -84,13 +107,12 @@ def _install_ga_proxy(owner):
 
 
 class _TakesAlias[T, **P, R](classmethod):
-    def __init__(self, func: Callable[Concatenate[T, P], R]):
+    def __init__(self, func: Callable[Concatenate[type[T], P], R]):
         assert not isinstance(func, classmethod)
         setattr(func, _TA_REF_ATTR, self)
         super().__init__(func)
 
     def __set_name__(self, owner, name):
-        # self.cm.__set_name__(owner, name)
         self.name = name
         _install_ga_proxy(owner)
 
@@ -105,8 +127,8 @@ class _TakesAlias[T, **P, R](classmethod):
 
 @overload
 def takes_alias[T, **P, R](
-    fun_c: Callable[Concatenate[T, P], R], *, patch_super: bool = False
-) -> Callable[Concatenate[T, P], R]: ...
+    fun_c: Callable[Concatenate[type[T], P], R], *, patch_super: bool = False
+) -> Callable[Concatenate[type[T], P], R]: ...
 
 
 @overload
@@ -114,16 +136,20 @@ def takes_alias[T, **P, R](
     fun_c: None = None,
     *,
     patch_super: bool = False,
-) -> Callable[[Callable[Concatenate[T, P], R]], Callable[Concatenate[T, P], R]]: ...
+) -> Callable[
+    [Callable[Concatenate[type[T], P], R]], Callable[Concatenate[type[T], P], R]
+]: ...
 
 
 def takes_alias[T, **P, R](
-    fun_c: Callable[Concatenate[T, P], R] | None = None,
+    fun_c: Callable[Concatenate[type[T], P], R] | None = None,
     *,
     patch_super: bool = False,
 ) -> (
-    Callable[Concatenate[T, P], R]
-    | Callable[[Callable[Concatenate[T, P], R]], Callable[Concatenate[T, P], R]]
+    Callable[Concatenate[type[T], P], R]
+    | Callable[
+        [Callable[Concatenate[type[T], P], R]], Callable[Concatenate[type[T], P], R]
+    ]
 ):
     if fun_c is None:
         return partial(takes_alias, patch_super=patch_super)
@@ -133,12 +159,12 @@ def takes_alias[T, **P, R](
         raise ValueError(f"TakesAlias must wrap a classmethod, got {type(cm)} for {cm}")
     func = cm.__func__
     if not patch_super:
-        return cast(Callable[Concatenate[T, P], R], _TakesAlias(func))
+        return cast(Callable[Concatenate[type[T], P], R], _TakesAlias(func))
     newfunc = inject_locals(
         super=_super, _decorator_names=["takes_alias", "classmethod"]
     )(func)
     assert isinstance(newfunc, types.FunctionType)
-    return cast(Callable[Concatenate[T, P], R], _TakesAlias(newfunc))
+    return cast(Callable[Concatenate[type[T], P], R], _TakesAlias(newfunc))
 
 
 def make_alias_instance_from_alias(alias_cls, alias):
