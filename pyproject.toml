@@ -5,28 +5,33 @@ build-backend = "hatchling.build"
 [project]
 name = "paramsight"
 version = "0.1.0"
-description = "TODO"
+description = "Runtime type-parameter resolution for Python generics, plus generic-alias access inside classmethods."
 readme = "README.md"
 requires-python = ">=3.13"
+license = { file = "LICENSE" }
 authors = [
     {name = "Glen Taggart", email = "glenmtaggart@gmail.com"}
 ]
-keywords = []
+keywords = ["typing", "generics", "typevar", "reflection", "introspection"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 
 dependencies = [
     "pydantic>=2.12.3",
 ]
 
-[project.scripts]
-
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.14.3",
+    "pyright>=1.1.400",
+    "hypothesis>=6.0.0",
 ]
 
 
@@ -39,8 +44,19 @@ ignore = ["E741"]
 fixable = ["ALL"]
 unfixable = ["B"]
 
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures intentionally use non-CapWords class names, helper params like
+# `Base`, bare expressions as type-checker probes, and legacy `Generic[T]` /
+# generic-function syntax (paramsight must work with old-style generics, so the
+# suite deliberately exercises them).
+"tests/**" = ["N801", "N802", "N803", "N806", "B018", "UP046", "UP047"]
+
 [tool.pyright]
 pythonVersion = "3.13"
+# Type-checking is enforced on the shipped package. The test suite deliberately
+# exercises runtime-dynamic / type-invalid scenarios (it's a reflection
+# library) and is validated by pytest, not pyright.
+include = ["src"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/paramsight"]

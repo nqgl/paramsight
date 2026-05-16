@@ -1,13 +1,13 @@
 from attrs import define
 
-from paramsight import get_resolved_typevars_for_base, takes_alias
+from paramsight import get_args_at_base, takes_alias
 
 
 class B:
     @takes_alias
     @classmethod
     def get_type_b(cls):
-        return get_resolved_typevars_for_base(cls, B)
+        return get_args_at_base(cls, B)
 
 
 @define
@@ -17,7 +17,7 @@ class A[T](B):
     @takes_alias
     @classmethod
     def get_type(cls):
-        return get_resolved_typevars_for_base(cls, A)
+        return get_args_at_base(cls, A)
 
     @takes_alias
     @classmethod
@@ -34,7 +34,7 @@ class C[T]:
     @takes_alias
     @classmethod
     def get_type_c(cls):
-        return get_resolved_typevars_for_base(cls, C)
+        return get_args_at_base(cls, C)
 
 
 @define
@@ -42,7 +42,7 @@ class D[T]:
     @takes_alias
     @classmethod
     def get_type_d(cls):
-        return get_resolved_typevars_for_base(cls, D)
+        return get_args_at_base(cls, D)
 
 
 @define
@@ -50,7 +50,7 @@ class E[T](D[T]):
     @takes_alias
     @classmethod
     def get_type_e(cls):
-        return get_resolved_typevars_for_base(cls, E)
+        return get_args_at_base(cls, E)
 
 
 def test_a_class_get_type():

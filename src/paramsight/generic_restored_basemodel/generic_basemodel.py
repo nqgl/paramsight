@@ -8,12 +8,28 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
-from pydantic.functional_serializers import SerializerFunctionWrapHandler
 from pydantic_core import PydanticCustomError
+from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
-from paramsight import get_resolved_typevars_for_base, takes_alias
+from paramsight import get_args_at_base, takes_alias
 from paramsight.generic_restored_basemodel.typeref import TypeRef
 from paramsight.type_utils import get_num_typevars, get_origin_robust, is_generic_alias
+
+
+def _origin_issubclass(value: Any, base: Any) -> bool:
+    """``issubclass`` that tolerates generic aliases without raising.
+
+    Both operands are reduced to their unsubscripted origin (so ``list[int]``
+    is compared as ``list``). This is a *validation* check on possibly-hostile
+    deserialized type info, so it fails **closed**: if a meaningful class
+    comparison can't be made, return ``False`` and let the caller reject it
+    rather than waving it through.
+    """
+    value = get_origin_robust(value) or value
+    base = get_origin_robust(base) or base
+    if isinstance(value, type) and isinstance(base, type):
+        return issubclass(value, base)
+    return False
 
 
 class GenericBaseModel(BaseModel):
@@ -36,14 +52,23 @@ class GenericBaseModel(BaseModel):
     @takes_alias
     @classmethod
     def get_type_parameters(cls):
-        return get_resolved_typevars_for_base(cls, get_origin_robust(cls) or cls)
+        return get_args_at_base(cls, get_origin_robust(cls) or cls)
 
     @takes_alias
     @classmethod
     def _select_specialized_alias(
         cls,
         value: Any,
-    ) -> tuple[type["GenericBaseModel"], Any]:
+    ) -> tuple[Any, Any]:
+        """Pick the model to validate ``value`` against.
+
+        Returns ``(target, value)``. ``target`` is a ``GenericBaseModel``
+        (sub)class or a parameterized alias of one — typed ``Any`` because it
+        spans pydantic-generated specialization classes and typing aliases,
+        which have no common static type. If ``target is cls`` the caller
+        validates normally; otherwise it delegates to
+        ``target.model_validate``.
+        """
         if get_num_typevars(cls) == 0:
             return cls, value
         ga_params = None
@@ -75,15 +100,19 @@ class GenericBaseModel(BaseModel):
                     {"expected": len(ga_params), "actual": len(tvs)},
                 )
             if not all(  # assuming covariance? not clear if this is best
-                issubclass(tv, param) for tv, param in zip(tvs, ga_params, strict=True)
+                _origin_issubclass(tv, param)
+                for tv, param in zip(tvs, ga_params, strict=True)
             ):
                 raise PydanticCustomError(
                     "generic_model_type",
-                    "GenericModel expects type arguments to be subclasses of {expected}",
+                    "GenericModel expects type arguments to be subclasses "
+                    "of {expected}",
                     {"expected": ga_params},
                 )
 
-        alias = cls.__class_getitem__(tvs)
+        # tvs are runtime-resolved types/aliases; the checker can't model
+        # dynamic pydantic specialization here.
+        alias = cls.__class_getitem__(tvs)  # pyright: ignore[reportArgumentType]
         return alias, value
 
     @model_validator(mode="wrap")

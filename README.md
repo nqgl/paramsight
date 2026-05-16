@@ -1,6 +1,8 @@
 
 # paramsight
 
+[![CI](https://github.com/nqgl/paramsight/actions/workflows/ci.yml/badge.svg)](https://github.com/nqgl/paramsight/actions/workflows/ci.yml)
+
 **Consistent runtime type parameter lookup + generic alias access inside classmethods**
 
 `paramsight` enables:
@@ -50,7 +52,7 @@ assert get_args_at_base(NestedList[int], list) == (list[int],)   # ...but params
 assert get_args_at_base(NestedList[int], NestedList) == (int,)   # (and NestedList's own typevar)
 ```
 
-`TypeVarValue` is fully understood by type checkers (at least Pylance) — e.g. a checker knows `isinstance(obj, box.value_type)` narrows `obj` to that box's element type. See the dedicated `TypeVarValue` section below for the details, caveats, and the pydantic note. Unfortunately, this can't level of typing information isn't achievable with `get_args_at_base`.
+`TypeVarValue` is fully understood by Pyright (and therefore Pylance, which is built on Pyright) — e.g. the checker knows `isinstance(obj, box.value_type)` narrows `obj` to that box's element type. (This is verified in the test suite with `typing.assert_type`.) See the dedicated `TypeVarValue` section below for the details, caveats, and the pydantic note. This level of static typing isn't achievable with `get_args_at_base`, which returns an untyped tuple.
 
 ## Features
 

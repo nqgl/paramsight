@@ -1,4 +1,3 @@
-import paramsight._paramsight as _paramsight
 from paramsight._paramsight import (
     get_args_at_base,
     get_resolved_typevars_for_base,

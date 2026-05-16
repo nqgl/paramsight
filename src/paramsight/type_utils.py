@@ -8,6 +8,7 @@ from typing import (
     TypeGuard,
     TypeIs,
     TypeVar,
+    cast,
     get_args,
     get_origin,
 )
@@ -42,7 +43,9 @@ def get_origin_robust(ga: Any) -> type | None:
     else:
         res = get_origin(ga)
     if res is typing.Union:
-        return types.UnionType
+        # `types.UnionType` is the runtime origin of `X | Y`; it's a class,
+        # but pyright won't narrow type[UnionType] to `type` (it's @final).
+        return cast(type, types.UnionType)
     assert isinstance(res, type | None)
     return res
 

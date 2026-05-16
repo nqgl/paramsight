@@ -6,7 +6,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import BaseModel
 
-from paramsight._paramsight import get_resolved_typevars_for_base
+from paramsight._paramsight import get_args_at_base
 from paramsight.aliasclassmethod import (
     _is_specialized_generic,
     takes_alias,
@@ -53,7 +53,7 @@ class CheckPlain[T]:
     def check_2(cls, arg: int):
         """checking that chained aliasclassmethod decorators work"""
         assert _is_specialized_generic(cls)
-        return get_resolved_typevars_for_base(cls, CheckPlain)
+        return get_args_at_base(cls, CheckPlain)
 
     @takes_alias
     @classmethod
@@ -136,7 +136,7 @@ class CheckAttrs[T]:
     def check_2(cls, arg: int):
         """checking that chained aliasclassmethod decorators work"""
         assert _is_specialized_generic(cls)
-        return get_resolved_typevars_for_base(cls, CheckAttrs)
+        return get_args_at_base(cls, CheckAttrs)
 
     @takes_alias
     @classmethod

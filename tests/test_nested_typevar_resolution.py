@@ -8,7 +8,7 @@ returned the unresolved alias (``Wrap[T]``) instead of substituting in the
 concrete argument.
 """
 
-from paramsight import get_resolved_typevars_for_base
+from paramsight import get_args_at_base
 
 # --- Building blocks reused by several tests ---------------------------------
 
@@ -37,20 +37,20 @@ class ArchImpl(Arch[ArchImplCfg]): ...
 def test_nested_typevar_via_subclass():
     """ArchImpl subclasses Arch[ArchImplCfg]; ArchBase.CfgT should resolve
     to CfgBase[ArchImplCfg], not the unresolved CfgBase[InnerCfgT]."""
-    assert get_resolved_typevars_for_base(ArchImpl, ArchBase) == (CfgBase[ArchImplCfg],)
+    assert get_args_at_base(ArchImpl, ArchBase) == (CfgBase[ArchImplCfg],)
 
 
 def test_nested_typevar_via_subscript():
     """Same resolution should hold when starting from the generic alias
     Arch[ArchImplCfg] directly rather than via a subclass."""
-    assert get_resolved_typevars_for_base(Arch[ArchImplCfg], ArchBase) == (
+    assert get_args_at_base(Arch[ArchImplCfg], ArchBase) == (
         CfgBase[ArchImplCfg],
     )
 
 
 def test_nested_typevar_intermediate_resolution_still_works():
     """The intermediate base Arch should still resolve to its own typevar."""
-    assert get_resolved_typevars_for_base(ArchImpl, Arch) == (ArchImplCfg,)
+    assert get_args_at_base(ArchImpl, Arch) == (ArchImplCfg,)
 
 
 # --- Two-level nested wrapping ----------------------------------------------
@@ -69,13 +69,13 @@ class TwoLevelImpl(TwoLevelArch[ArchImplCfg]): ...
 
 
 def test_doubly_nested_typevar_via_subclass():
-    assert get_resolved_typevars_for_base(TwoLevelImpl, ArchBase) == (
+    assert get_args_at_base(TwoLevelImpl, ArchBase) == (
         CfgBase[Outer[ArchImplCfg]],
     )
 
 
 def test_doubly_nested_typevar_via_subscript():
-    assert get_resolved_typevars_for_base(TwoLevelArch[ArchImplCfg], ArchBase) == (
+    assert get_args_at_base(TwoLevelArch[ArchImplCfg], ArchBase) == (
         CfgBase[Outer[ArchImplCfg]],
     )
 
@@ -93,14 +93,14 @@ class MultiImpl(MultiArch[int, str]): ...
 
 
 def test_mixed_nested_and_direct_typevars():
-    assert get_resolved_typevars_for_base(MultiImpl, MultiBase) == (
+    assert get_args_at_base(MultiImpl, MultiBase) == (
         CfgBase[int],
         str,
     )
 
 
 def test_mixed_nested_and_direct_typevars_subscript():
-    assert get_resolved_typevars_for_base(MultiArch[int, str], MultiBase) == (
+    assert get_args_at_base(MultiArch[int, str], MultiBase) == (
         CfgBase[int],
         str,
     )
@@ -124,9 +124,9 @@ class L3Impl(L3[int]): ...
 def test_chained_nested_substitution():
     """Substitutions must compose across levels: L3[int] -> L2[Outer[int]]
     -> L1[CfgBase[Outer[int]]]."""
-    assert get_resolved_typevars_for_base(L3Impl, L1) == (CfgBase[Outer[int]],)
-    assert get_resolved_typevars_for_base(L3Impl, L2) == (Outer[int],)
-    assert get_resolved_typevars_for_base(L3[int], L1) == (CfgBase[Outer[int]],)
+    assert get_args_at_base(L3Impl, L1) == (CfgBase[Outer[int]],)
+    assert get_args_at_base(L3Impl, L2) == (Outer[int],)
+    assert get_args_at_base(L3[int], L1) == (CfgBase[Outer[int]],)
 
 
 # --- Reordering of typevars across nesting ----------------------------------
@@ -139,7 +139,7 @@ class SwapImpl(Swap[int, str]): ...
 
 
 def test_typevars_swapped_inside_nested_args():
-    assert get_resolved_typevars_for_base(SwapImpl, Pair) == (
+    assert get_args_at_base(SwapImpl, Pair) == (
         CfgBase[str],
         Outer[int],
     )
@@ -155,7 +155,7 @@ class DupImpl(Dup[int]): ...
 
 
 def test_repeated_typevar_in_nested_args():
-    assert get_resolved_typevars_for_base(DupImpl, Pair) == (
+    assert get_args_at_base(DupImpl, Pair) == (
         CfgBase[int],
         Outer[int],
     )
@@ -170,7 +170,7 @@ class GenericArg[Q]: ...
 def test_substitution_with_generic_alias_argument():
     """When the outer specialization itself supplies a generic alias as the
     argument, that alias should appear inside the resolved nested type."""
-    assert get_resolved_typevars_for_base(Arch[GenericArg[int]], ArchBase) == (
+    assert get_args_at_base(Arch[GenericArg[int]], ArchBase) == (
         CfgBase[GenericArg[int]],
     )
 
@@ -191,8 +191,8 @@ class WithSiblingsImpl(WithSiblings[int]): ...
 
 
 def test_sibling_bases_nested_resolves_correctly():
-    assert get_resolved_typevars_for_base(WithSiblingsImpl, SiblingA) == (CfgBase[int],)
+    assert get_args_at_base(WithSiblingsImpl, SiblingA) == (CfgBase[int],)
 
 
 def test_sibling_bases_direct_still_resolves():
-    assert get_resolved_typevars_for_base(WithSiblingsImpl, SiblingB) == (int,)
+    assert get_args_at_base(WithSiblingsImpl, SiblingB) == (int,)

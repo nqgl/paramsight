@@ -1,4 +1,8 @@
 *.egg-info/
 *.lock
 *.pyc
+__pycache__/
 .hypothesis/*
+.venv/
+.claude/
+tests/tests/

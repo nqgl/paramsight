@@ -1,11 +1,13 @@
 import importlib
 import inspect
+import types
+import warnings
 from types import FunctionType
-from typing import Any, Self
+from typing import Self
 
 from pydantic import AliasChoices, BaseModel, Field
 
-from paramsight import get_resolved_typevars_for_base, takes_alias
+from paramsight import get_args_at_base, takes_alias
 from paramsight.type_utils import get_origin_robust
 
 
@@ -43,17 +45,17 @@ class ObjRef[T = object](BaseModel):
     @takes_alias
     @classmethod
     def get_t(cls) -> type[T]:
-        (t,) = get_resolved_typevars_for_base(cls, ObjRef)
+        (t,) = get_args_at_base(cls, ObjRef)
         return t  # type: ignore
 
     def get_obj(self, strict: bool = False) -> T:
         module = importlib.import_module(self.module)
         obj = getattr(module, self.obj_name)
         if get_src(obj) != self.source_backup:
-            print(
-                f"""
-                warning: loaded source code for {self.obj_name} appears to have changed 
-                """
+            warnings.warn(
+                f"loaded source code for {self.obj_name!r} appears to have "
+                f"changed since this model was serialized",
+                stacklevel=2,
             )
             if strict:
                 raise ValueError(
@@ -64,7 +66,7 @@ class ObjRef[T = object](BaseModel):
         if get_origin_robust(t) is type:
             import typing
 
-            # type_t = get_resolved_typevars_for_base(t, type)
+            # type_t = get_args_at_base(t, type)
             (type_t,) = typing.get_args(t)
             valid = issubclass(obj, type_t)
         else:
@@ -80,7 +82,7 @@ class ObjRef[T = object](BaseModel):
 
 
 class TypeRef(BaseModel):
-    base: ObjRef
+    base: ObjRef[type]
     params: "tuple[TypeRef, ...] | None" = None
 
     @classmethod
@@ -92,15 +94,15 @@ class TypeRef(BaseModel):
         assert (base is None) == (len(args) == 0)
         if base is None:
             assert isinstance(ga, type)
-            return cls(base=ObjRef.from_obj(ga), params=None)
-        arg_values = get_resolved_typevars_for_base(ga, base)
+            return cls(base=ObjRef[type].from_obj(ga), params=None)
+        arg_values = get_args_at_base(ga, base)
         return cls(
-            base=ObjRef.from_obj(base),
+            base=ObjRef[type].from_obj(base),
             params=tuple(cls.from_ga(arg_value) for arg_value in arg_values),
         )
 
-    def get(self):
+    def get(self) -> type | types.GenericAlias:
         if self.params is None:
             return self.base.get_obj()
         params = tuple(param.get() for param in self.params)
-        return self.base.get_obj()[*params]
+        return self.base.get_obj()[*params]  # type: ignore # should be a generic type if it has params

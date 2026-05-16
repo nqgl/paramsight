@@ -113,24 +113,27 @@ def _resolve(
 
 
 @cache
-def get_resolved_typevars_for_base(
-    cls: type | GenericAlias,
-    target_base: type,
-    return_bound_as_fallback: bool = False,
-) -> tuple[type | GenericAlias | None, ...]:
-    return get_resolved_typevars_for_base_uncached(
-        cls=cls,
-        target_base=target_base,
-        return_bound_as_fallback=return_bound_as_fallback,
-    )
-
-
 def get_args_at_base(
     cls: type | GenericAlias,
     target_base: type,
     return_bound_as_fallback: bool = False,
 ) -> tuple[type | GenericAlias | None, ...]:
-    return get_resolved_typevars_for_base(cls, target_base, return_bound_as_fallback)
+    """Resolve ``target_base``'s type parameters as seen from ``cls``.
+
+    Like :func:`typing.get_args`, but evaluated at an ancestor base anywhere
+    in ``cls``'s inheritance hierarchy rather than only at the immediate
+    generic alias. Returns one entry per typevar of ``target_base``.
+    """
+    result = _resolve(cls, target_base, {}, return_bound_as_fallback)
+    if result is None:
+        raise ValueError(
+            f"failed to locate target base {target_base!r} in hierarchy of {cls!r}"
+        )
+    return result
+
+
+# Legacy alias — prefer ``get_args_at_base``. Same object, so it shares the cache.
+get_resolved_typevars_for_base = get_args_at_base
 
 
 def get_typevar_value(
@@ -158,26 +161,3 @@ def get_typevar_value(
             f"its typevars are {params}"
         ) from None
     return get_args_at_base(cls, target_base, return_bound_as_fallback)[idx]
-
-
-def get_resolved_typevars_for_base_uncached(
-    cls: type | GenericAlias,
-    target_base: type,
-    return_bound_as_fallback: bool = False,
-) -> tuple[type | GenericAlias | None, ...]:
-    result = _resolve(cls, target_base, {}, return_bound_as_fallback)
-    if result is None:
-        raise ValueError(
-            f"failed to locate target base {target_base!r} in hierarchy of {cls!r}"
-        )
-    return result
-
-
-def get_resolved_typevars_for_base_inst(
-    inst: Any, target_base: type, return_bound_as_fallback: bool = False
-) -> tuple[type | GenericAlias | None, ...]:
-    if hasattr(inst, "__orig_class__"):
-        cls = inst.__orig_class__
-    else:
-        cls = inst.__class__
-    return get_resolved_typevars_for_base(cls, target_base, return_bound_as_fallback)

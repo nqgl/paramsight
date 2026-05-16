@@ -1,6 +1,6 @@
 from typing import Generic, TypeVar
 
-from paramsight import get_resolved_typevars_for_base
+from paramsight import get_args_at_base
 
 
 class Cfg: ...
@@ -46,29 +46,29 @@ class OldStyleArchImpl(OldStyleArch[ArchImplCfg]): ...
 
 
 def test_nested_generic_arg_resolves_from_specialized_alias():
-    assert get_resolved_typevars_for_base(Arch[ArchImplCfg], ArchBase) == (
+    assert get_args_at_base(Arch[ArchImplCfg], ArchBase) == (
         CfgBase[ArchImplCfg],
     )
 
 
 def test_nested_generic_arg_resolves_through_concrete_subclass():
-    assert get_resolved_typevars_for_base(ArchImpl, ArchBase) == (CfgBase[ArchImplCfg],)
+    assert get_args_at_base(ArchImpl, ArchBase) == (CfgBase[ArchImplCfg],)
 
 
 def test_nested_generic_arg_uses_each_concrete_subclass_specialization():
-    assert get_resolved_typevars_for_base(OtherArchImpl, ArchBase) == (
+    assert get_args_at_base(OtherArchImpl, ArchBase) == (
         CfgBase[OtherArchImplCfg],
     )
 
 
 def test_nested_generic_arg_resolves_unspecialized_default():
-    assert get_resolved_typevars_for_base(DefaultArchImpl, ArchBase) == (
+    assert get_args_at_base(DefaultArchImpl, ArchBase) == (
         CfgBase[ArchImplCfg],
     )
 
 
 def test_nested_generic_arg_resolves_old_style_generic_subclass():
-    assert get_resolved_typevars_for_base(OldStyleArchImpl, ArchBase) == (
+    assert get_args_at_base(OldStyleArchImpl, ArchBase) == (
         CfgBase[ArchImplCfg],
     )
 

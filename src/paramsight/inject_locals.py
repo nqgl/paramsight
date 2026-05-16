@@ -8,7 +8,9 @@ from collections.abc import Callable
 from typing import overload
 
 
-def _parse_function_absolute(fn: object) -> tuple[ast.FunctionDef, ast.Module]:
+def _parse_function_absolute(
+    fn: types.FunctionType,
+) -> tuple[ast.FunctionDef, ast.Module]:
     # 1) Get source + absolute starting line
     lines, start_line = inspect.getsourcelines(fn)  # raises OSError if unavailable
     src = textwrap.dedent("".join(lines))
@@ -52,7 +54,6 @@ def _strip_our_decorators(
             f"expected {decorator_names}, got {selected_decorators}"
         )
     fdef.decorator_list = fdef.decorator_list[idx + len(decorator_names) :]
-    # fdef.decorator_list = fdef.decorator_list[idx + 1 :]
 
 
 def inject_locals(
@@ -73,10 +74,15 @@ def inject_locals(
         return False
 
     def _decorate_function(fn: types.FunctionType) -> types.FunctionType:
-        while hasattr(fn, "__wrapped__") and not isinstance(
-            fn, classmethod | staticmethod
+        # Defensively unwrap functools.wraps-style chains, but only while the
+        # wrapped object is itself a plain function. We rebuild below via
+        # fn.__code__ / __globals__ / __closure__, which only exist on a
+        # FunctionType; if __wrapped__ is a method / partial / other callable,
+        # stop and operate on what we have rather than asserting/crashing.
+        while isinstance(
+            (wrapped := getattr(fn, "__wrapped__", None)), types.FunctionType
         ):
-            fn = fn.__wrapped__
+            fn = wrapped
         if check_function_already_injected(fn):  # TODO Remove?
             return fn
 
@@ -86,7 +92,6 @@ def inject_locals(
             raise RuntimeError("Source not available; cannot inject locals.") from e
 
         src = textwrap.dedent(src)
-        # fdef = next((n for n in mod.body if isinstance(n, ast.FunctionDef)), None)
         fdef, _ = _parse_function_absolute(fn)
 
         if fdef is None or fdef.name != fn.__name__:
@@ -122,31 +127,28 @@ def inject_locals(
             prologue.append(ast.copy_location(assign, anchor))
 
         had_class_freevar = "__class__" in fn.__code__.co_freevars
-        if had_class_freevar:
-            # harmless read so the compiler emits a __class__ freevar
-            touch = ast.Expr(value=ast.Name(id="__class__", ctx=ast.Load()))
-            fdef.body.insert(0, ast.copy_location(touch, anchor))
+        assert had_class_freevar
+        # harmless read so the compiler emits a __class__ freevar
+        touch = ast.Expr(value=ast.Name(id="__class__", ctx=ast.Load()))
+        fdef.body.insert(0, ast.copy_location(touch, anchor))
 
         # Prepend prologue *after* the __class__ touch
         #   (so traces still land on real lines)
         fdef.body = prologue + fdef.body
-        # fdef.decorator_list = []  # strip others; we'll rewrap later
 
         # ---- Compile with accurate linenos ----
-        if had_class_freevar:
-            dummy_cls = ast.ClassDef(
-                name=f"__InjHost_{uuid.uuid4().hex}",
-                bases=[],
-                keywords=[],
-                body=[fdef],
-                decorator_list=[],
-            )
-            ast.copy_location(
-                dummy_cls, fdef
-            )  # class gets same starting line as the method
-            mod2 = ast.Module(body=[dummy_cls], type_ignores=[])
-        else:
-            mod2 = ast.Module(body=[fdef], type_ignores=[])
+
+        dummy_cls = ast.ClassDef(
+            name=f"__InjHost_{uuid.uuid4().hex}",
+            bases=[],
+            keywords=[],
+            body=[fdef],
+            decorator_list=[],
+        )
+        ast.copy_location(
+            dummy_cls, fdef
+        )  # class gets same starting line as the method
+        mod2 = ast.Module(body=[dummy_cls], type_ignores=[])
 
         ast.fix_missing_locations(mod2)
 
@@ -163,115 +165,43 @@ def inject_locals(
             if had_class_freevar
             else ns[fn.__name__]
         )
-
-        # new_globals = dict(fn.__globals__)
-        # new_globals[inj_check_key] = True
-
-        # # Anchor for locations
-        # anchor: ast.AST = fdef.body[0] if fdef.body else fdef
-
-        # # Build prologue with locations
-        # salt = uuid.uuid4().hex
-        # prologue: list[ast.stmt] = []
-        # for local_name, obj in bindings.items():
-        #     gname = f"_inj_{local_name}_{salt}"
-        #     new_globals[gname] = obj
-
-        #     assign = ast.Assign(
-        #         targets=[ast.Name(id=local_name, ctx=ast.Store())],
-        #         value=ast.Name(id=gname, ctx=ast.Load()),
-        #         type_comment=None,
-        #     )
-        #     assign = ast.copy_location(assign, anchor)
-        #     prologue.append(assign)
-
-        # had_class_freevar = "__class__" in fn.__code__.co_freevars
-
-        # # If we need the __class__ cell, ensure the function body references it
-        # if had_class_freevar:
-        #     cls_ref = ast.Expr(value=ast.Name(id="__class__", ctx=ast.Load()))
-        #     cls_ref = ast.copy_location(cls_ref, anchor)
-        #     fdef.body.insert(0, cls_ref)
-
-        # # Prepend prologue
-        # fdef.body = prologue + fdef.body
-
-        # # We’ll compile either as a top-level function or inside a dummy class
-        # ns: dict[str, object] = {}
-        # if had_class_freevar:
-        #     # Strip any remaining decorators during the temporary compile
-        #     fdef.decorator_list = []
-
-        #     dummy_cls_name = f"_InjHost_{uuid.uuid4().hex}"
-        #     cls = ast.ClassDef(
-        #         name=dummy_cls_name,
-        #         bases=[],
-        #         keywords=[],
-        #         body=[fdef],
-        #         decorator_list=[],
-        #     )
-        #     cls = ast.copy_location(cls, fdef)  # give the class a location
-
-        #     mod2 = ast.Module(body=[cls], type_ignores=[])
-        #     ast.fix_missing_locations(mod2)
-
-        #     code = compile(
-        #         mod2,
-        #         filename=inspect.getsourcefile(fn) or "<ast>",
-        #         mode="exec",
-        #     )
-        #     exec(code, new_globals, ns)
-        #     tmp_cls = ns[dummy_cls_name]
-        #     tmp = tmp_cls.__dict__[fn.__name__]
-        # else:
-        #     fdef.decorator_list = []
-        #     mod2 = ast.Module(body=[fdef], type_ignores=[])
-        #     ast.fix_missing_locations(mod2)
-
-        #     code = compile(
-        #         mod2,
-        #         filename=inspect.getsourcefile(fn) or "<ast>",
-        #         mode="exec",
-        #     )
-        #     exec(code, new_globals, ns)
-        #     tmp = ns[fn.__name__]
+        assert isinstance(tmp, types.FunctionType)
 
         # Rebuild function, preserving the original closure if needed
-        if had_class_freevar:
-            if "__class__" not in tmp.__code__.co_freevars:
-                raise RuntimeError(
-                    "Rewritten function lost the __class__ freevar; "
-                    "ensure the AST references __class__ at least once."
-                )
-            if fn.__closure__ is None:
-                raise RuntimeError(
-                    "Original function had __class__ freevar but no closure."
-                )
-            new_fn = types.FunctionType(
-                tmp.__code__,
-                mod_globals,
-                name=fn.__name__,
-                argdefs=fn.__defaults__,
-                closure=fn.__closure__,
+
+        if "__class__" not in tmp.__code__.co_freevars:
+            raise RuntimeError(
+                "Rewritten function lost the __class__ freevar; "
+                "ensure the AST references __class__ at least once."
             )
-        else:
-            new_fn = tmp
-            new_fn.__defaults__ = fn.__defaults__
+        if fn.__closure__ is None:
+            raise RuntimeError(
+                "Original function had __class__ freevar but no closure."
+            )
+        new_fn = types.FunctionType(
+            tmp.__code__,
+            mod_globals,
+            name=fn.__name__,
+            argdefs=fn.__defaults__,
+            closure=fn.__closure__,
+        )
 
         new_fn.__kwdefaults__ = fn.__kwdefaults__
         new_fn.__annotations__ = dict(getattr(fn, "__annotations__", {}))
         new_fn.__qualname__ = fn.__qualname__
-        return functools.update_wrapper(new_fn, fn)
+        f = functools.update_wrapper(new_fn, fn)
+        assert f is new_fn
+        return new_fn
 
     @overload
-    def decorator[**P, R](obj: classmethod) -> classmethod: ...
+    def decorator(obj: classmethod) -> classmethod: ...
     @overload
-    def decorator[**P, R](obj: staticmethod) -> staticmethod: ...
+    def decorator(obj: staticmethod) -> staticmethod: ...
     @overload
     def decorator[**P, R](obj: Callable[P, R]) -> Callable[P, R]: ...
     @overload
-    def decorator[**P, R](obj: object) -> object: ...
-    def decorator[**P, R](obj: object) -> object:
+    def decorator(obj: object) -> object: ...
+    def decorator(obj: object) -> object:
         if isinstance(obj, classmethod):
             inner = _decorate_function(obj.__func__)
             return classmethod(inner)
