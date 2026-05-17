@@ -6,16 +6,16 @@ from functools import cache, partial
 from types import GenericAlias
 from typing import Concatenate, cast, overload
 
-from paramsight._class_swap import is_creating_synth
-from paramsight._orig_class import (
-    _has_orig_class_storage,
-    _slot_strategy,
-    get_orig_class,
-)
 from paramsight._ta_ref_attr import _TA_REF_ATTR
 from paramsight.alias_super import _super
 from paramsight.ga_proxy import _GAProxy
 from paramsight.inject_locals import inject_locals
+from paramsight.slotted_strategies import (
+    _has_orig_class_storage,
+    _slot_strategy,
+    get_orig_class,
+    is_creating_synth,
+)
 from paramsight.type_utils import _is_pydantic
 
 

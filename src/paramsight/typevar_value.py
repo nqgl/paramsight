@@ -5,15 +5,15 @@ See :class:`TypeVarValue`.
 
 from typing import Any
 
-from paramsight._orig_class import (
-    _has_orig_class_storage,
-    _slot_strategy,
-    get_orig_class,
-)
 from paramsight._paramsight import get_args_at_base, get_typevar_value
 from paramsight.aliasclassmethod import (
     _install_ga_proxy,
     _raise_slotted_instance_without_storage,
+)
+from paramsight.slotted_strategies import (
+    _has_orig_class_storage,
+    _slot_strategy,
+    get_orig_class,
 )
 from paramsight.type_utils import _is_typevar, get_parameters
 

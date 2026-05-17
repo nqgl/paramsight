@@ -2,11 +2,11 @@ import inspect
 import typing
 from typing import Any
 
-from paramsight._class_swap import get_synth
 from paramsight._is_aliasclassmethod import _is_aliasclassmethod
-from paramsight._orig_class import (
+from paramsight.slotted_strategies import (
     _has_orig_class_storage,
     _slot_strategy,
+    get_synth,
     remember_orig_class,
 )
 

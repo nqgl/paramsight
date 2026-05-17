@@ -83,3 +83,16 @@ def _synth_reduce(self):
     getstate = getattr(self, "__getstate__", None)
     state = getstate() if getstate is not None else self.__dict__
     return (_synth_new, (alias.__origin__, alias.__args__), state)
+
+
+def uses_class_swap(cls: type) -> type:
+    """Class decorator: track parametrization by swapping each instance's
+    ``__class__`` to a cached per-parametrization synthetic subclass.
+
+    No field pollution; survives ``attrs.evolve`` / ``copy`` / ``pickle``.
+    Trade-off: ``type(inst) is Cls`` becomes ``False`` (``isinstance`` still
+    works). Equivalent to ``_paramsight_slots = "class_swap"`` in the class
+    body.
+    """
+    cls._paramsight_slots = "class_swap"  # type: ignore[attr-defined]
+    return cls

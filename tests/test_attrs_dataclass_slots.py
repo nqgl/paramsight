@@ -34,6 +34,7 @@ import pytest
 from attrs import define, frozen
 
 from paramsight import (
+    add_field,
     get_args_at_base,
     takes_alias,
     uses_class_swap,
@@ -497,6 +498,66 @@ def test_uses_side_table_decorator_equivalent_to_marker():
 
 def test_uses_class_swap_decorator_sets_marker():
     assert SwapBox._paramsight_slots == "class_swap"
+
+
+# ---------------------------------------------------------------------------
+# @add_field: decorator-injected real ``__orig_class__`` field.
+# ---------------------------------------------------------------------------
+
+
+@define
+@add_field
+class AddFieldBox[T]:
+    x: int = 0
+
+    @takes_alias
+    @classmethod
+    def f(cls):
+        return get_args_at_base(cls, AddFieldBox)
+
+
+def test_add_field_makes_a_real_field_resolvable_instance_side():
+    assert "__orig_class__" in {a.name for a in attrs.fields(AddFieldBox)}
+    assert AddFieldBox[int](x=1).f() == (int,)
+
+
+def test_add_field_survives_evolve_copy_deepcopy_pickle():
+    inst = AddFieldBox[int](x=1)
+    assert attrs.evolve(inst).f() == (int,)
+    assert copy.copy(inst).f() == (int,)
+    assert copy.deepcopy(inst).f() == (int,)
+    assert pickle.loads(pickle.dumps(inst)).f() == (int,)
+
+
+def test_add_field_is_noop_when_already_declared():
+    @define
+    @add_field
+    class B[T]:
+        __orig_class__: type | None = None
+
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, B)
+
+    names = [a.name for a in attrs.fields(B)]
+    assert names.count("__orig_class__") == 1  # not double-added
+    assert B[str]().f() == (str,)
+
+
+def test_add_field_on_dataclass_slots():
+    @dataclass(slots=True)
+    @add_field
+    class DC[T]:
+        x: int = 0
+
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, DC)
+
+    assert "__orig_class__" in {f.name for f in dc_fields(DC)}
+    assert DC[int](x=1).f() == (int,)
 
 
 if __name__ == "__main__":
