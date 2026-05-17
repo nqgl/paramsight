@@ -33,10 +33,9 @@ import attrs
 import pytest
 from attrs import define, frozen
 
-from paramsight import (
+from paramsight import get_args_at_base, takes_alias
+from paramsight.slotted_strategies import (
     add_field,
-    get_args_at_base,
-    takes_alias,
     uses_class_swap,
     uses_side_table,
 )
