@@ -12,6 +12,7 @@ class B:
 
 @define
 class A[T](B):
+    _paramsight_slots = "side_table"
     x: T
 
     @takes_alias
@@ -39,6 +40,8 @@ class C[T]:
 
 @define
 class D[T]:
+    _paramsight_slots = "side_table"
+
     @takes_alias
     @classmethod
     def get_type_d(cls):
@@ -47,6 +50,7 @@ class D[T]:
 
 @define
 class E[T](D[T]):
+    # inherits _paramsight_slots from D via MRO
     @takes_alias
     @classmethod
     def get_type_e(cls):

@@ -125,6 +125,7 @@ class CheckBaseModel2[T](BaseModel):
 
 @define
 class CheckAttrs[T]:
+    _paramsight_slots = "side_table"
     x: T = 1
 
     @takes_alias
@@ -202,6 +203,7 @@ class B:
 
 @define
 class C[T](B):
+    _paramsight_slots = "side_table"
     x: T = 1
 
     @takes_alias
@@ -220,6 +222,7 @@ class B2:
 
 @define
 class C2[T](B2):
+    _paramsight_slots = "side_table"
     x: T = 1
 
     @takes_alias

@@ -3,6 +3,11 @@ import typing
 from typing import Any
 
 from paramsight._is_aliasclassmethod import _is_aliasclassmethod
+from paramsight._orig_class import (
+    _has_orig_class_storage,
+    _slot_strategy,
+    remember_orig_class,
+)
 
 _generic_alias_fields = [
     "_inst",
@@ -18,6 +23,7 @@ _generic_alias_fields = [
     "copy_with",
     "__repr__",
     "__reduce__",
+    "__reduce_ex__",
     "__mro_entries__",
     "__iter__",
     "__args__",
@@ -59,4 +65,34 @@ class _GAProxy(  # type:ignore
         return getattr(origin, name)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return super().__call__(*args, **kwargs)
+        result = super().__call__(*args, **kwargs)
+        # ``typing._GenericAlias.__call__`` already tried
+        # ``result.__orig_class__ = self`` and swallowed any failure. Three
+        # cases when it didn't stick:
+        #   1. The class has storage for ``__orig_class__`` (real slot or
+        #      attrs/dataclass field) but ``__setattr__`` rejected the write
+        #      (typical for ``@frozen``). Bypass via ``object.__setattr__``;
+        #      if even that fails, re-raise -- storage was detected, so the
+        #      caller would otherwise silently lose the parametrization.
+        #   2. ``_paramsight_slots = "side_table"`` is set: record out of
+        #      band. Raise loudly here if the instance can't be tracked at all
+        #      (not weakref-able) -- silent untracked-ness is the trap we're
+        #      preventing.
+        #   3. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
+        #      / ``TypeVarValue.__get__`` will raise *if* the instance is ever
+        #      looked up there. (Class-side use never needs ``__orig_class__``.)
+        if getattr(result, "__orig_class__", None) is not self:
+            cls = type(result)
+            if _has_orig_class_storage(cls):
+                object.__setattr__(result, "__orig_class__", self)
+            elif _slot_strategy(cls) == "side_table":
+                if not remember_orig_class(result, self):
+                    raise TypeError(
+                        f"paramsight: cannot record the parametrization of "
+                        f"{self!r}: instances of {cls.__name__} are slotted "
+                        f"and not weakref-able (no ``__weakref__`` slot). "
+                        f"Add ``weakref_slot=True`` to your @dataclass / "
+                        f"@define, or declare ``__orig_class__: type | None "
+                        f"= None`` on the class to use a real field instead."
+                    )
+        return result
