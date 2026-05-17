@@ -2,6 +2,7 @@ import inspect
 import typing
 from typing import Any
 
+from paramsight._class_swap import get_synth
 from paramsight._is_aliasclassmethod import _is_aliasclassmethod
 from paramsight._orig_class import (
     _has_orig_class_storage,
@@ -67,24 +68,28 @@ class _GAProxy(  # type:ignore
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         result = super().__call__(*args, **kwargs)
         # ``typing._GenericAlias.__call__`` already tried
-        # ``result.__orig_class__ = self`` and swallowed any failure. Three
-        # cases when it didn't stick:
+        # ``result.__orig_class__ = self`` and swallowed any failure. Cases
+        # when it didn't stick:
         #   1. The class has storage for ``__orig_class__`` (real slot or
         #      attrs/dataclass field) but ``__setattr__`` rejected the write
         #      (typical for ``@frozen``). Bypass via ``object.__setattr__``;
         #      if even that fails, re-raise -- storage was detected, so the
         #      caller would otherwise silently lose the parametrization.
-        #   2. ``_paramsight_slots = "side_table"`` is set: record out of
-        #      band. Raise loudly here if the instance can't be tracked at all
-        #      (not weakref-able) -- silent untracked-ness is the trap we're
-        #      preventing.
-        #   3. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
+        #   2. ``_paramsight_slots = "class_swap"``: swap ``__class__`` to a
+        #      cached synthetic ``__slots__=()`` subclass carrying the alias
+        #      (layout-compatible, so it works on slotted/frozen instances).
+        #   3. ``_paramsight_slots = "side_table"``: record out of band. Raise
+        #      loudly here if the instance can't be tracked at all (not
+        #      weakref-able) -- silent untracked-ness is the trap we prevent.
+        #   4. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
         #      / ``TypeVarValue.__get__`` will raise *if* the instance is ever
         #      looked up there. (Class-side use never needs ``__orig_class__``.)
         if getattr(result, "__orig_class__", None) is not self:
             cls = type(result)
             if _has_orig_class_storage(cls):
                 object.__setattr__(result, "__orig_class__", self)
+            elif _slot_strategy(cls) == "class_swap":
+                object.__setattr__(result, "__class__", get_synth(self))
             elif _slot_strategy(cls) == "side_table":
                 if not remember_orig_class(result, self):
                     raise TypeError(

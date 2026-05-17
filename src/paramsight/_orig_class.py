@@ -66,7 +66,7 @@ def _has_orig_class_storage(cls: type) -> bool:
     return False
 
 
-_VALID_SLOT_STRATEGIES = frozenset({"side_table"})
+_VALID_SLOT_STRATEGIES = frozenset({"side_table", "class_swap"})
 
 
 def _slot_strategy(owner: type) -> str | None:
@@ -84,6 +84,32 @@ def _slot_strategy(owner: type) -> str | None:
             f"of {sorted(_VALID_SLOT_STRATEGIES)} or unset."
         )
     return strategy
+
+
+def uses_side_table(cls: type) -> type:
+    """Class decorator: track parametrization of this slotted class's instances
+    out of band (``id``-keyed, weakref-cleaned).
+
+    No field pollution. Does NOT survive ``attrs.evolve`` / ``copy`` /
+    ``pickle``. Requires weakref-able instances (attrs ``@define`` / ``@frozen``
+    by default; ``@dataclass(slots=True)`` needs ``weakref_slot=True``).
+    Equivalent to ``_paramsight_slots = "side_table"`` in the class body.
+    """
+    cls._paramsight_slots = "side_table"  # type: ignore[attr-defined]
+    return cls
+
+
+def uses_class_swap(cls: type) -> type:
+    """Class decorator: track parametrization by swapping each instance's
+    ``__class__`` to a cached per-parametrization synthetic subclass.
+
+    No field pollution; survives ``attrs.evolve`` / ``copy`` / ``pickle``.
+    Trade-off: ``type(inst) is Cls`` becomes ``False`` (``isinstance`` still
+    works). Equivalent to ``_paramsight_slots = "class_swap"`` in the class
+    body.
+    """
+    cls._paramsight_slots = "class_swap"  # type: ignore[attr-defined]
+    return cls
 
 
 # Out-of-band ``id(instance) -> alias`` table for the "side_table" strategy.
@@ -113,8 +139,16 @@ def remember_orig_class(instance: object, alias: Any) -> bool:
 
 
 def get_orig_class(instance: object) -> Any | None:
-    """``instance.__orig_class__`` if present, else any side-table record."""
+    """The alias ``instance`` was constructed through, by any strategy:
+
+    1. ``__orig_class__`` (native ``__dict__`` storage, or a declared field);
+    2. ``_paramsight_alias`` on the synthetic class (``class_swap``);
+    3. the ``id``-keyed side table (``side_table``).
+    """
     orig = getattr(instance, "__orig_class__", None)
     if orig is not None:
         return orig
+    alias = getattr(type(instance), "_paramsight_alias", None)
+    if alias is not None:
+        return alias
     return _alias_by_id.get(id(instance))

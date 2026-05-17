@@ -15,9 +15,12 @@ Users provide one of:
 - a real field (``__orig_class__: type | None = None`` declared in the body,
   or via ``attrs.field``/``dataclasses.field`` to tune semantics) -- survives
   ``attrs.evolve`` / ``copy`` / ``pickle``;
-- ``_paramsight_slots = "side_table"`` -- out-of-band tracking (no field
-  pollution; does NOT survive ``evolve`` / ``copy`` / ``pickle``; needs
-  weakref-able instances).
+- ``_paramsight_slots = "side_table"`` (or ``@uses_side_table``) -- out-of-band
+  tracking (no field pollution; does NOT survive ``evolve`` / ``copy`` /
+  ``pickle``; needs weakref-able instances);
+- ``_paramsight_slots = "class_swap"`` (or ``@uses_class_swap``) -- per-
+  parametrization synthetic subclass (no field pollution; survives ``evolve``
+  / ``copy`` / ``pickle``; ``type(inst) is Cls`` becomes False).
 """
 
 import copy
@@ -30,7 +33,12 @@ import attrs
 import pytest
 from attrs import define, frozen
 
-from paramsight import get_args_at_base, takes_alias
+from paramsight import (
+    get_args_at_base,
+    takes_alias,
+    uses_class_swap,
+    uses_side_table,
+)
 
 # ---------------------------------------------------------------------------
 # The deferred raise: instance lookup is the trigger, not class creation.
@@ -348,6 +356,147 @@ def test_attrs_slots_rebuild_does_not_double_wrap_class_getitem():
         for b in bases
         if callable(b)
     ), "patched __class_getitem__ was wrapped around itself"
+
+
+# ---------------------------------------------------------------------------
+# Strategy: ``class_swap`` (synthetic per-parametrization subclass)
+# ---------------------------------------------------------------------------
+
+
+@uses_class_swap
+@frozen
+class SwapBox[T]:
+    x: int = 0
+
+    @takes_alias
+    @classmethod
+    def get_type(cls):
+        return get_args_at_base(cls, SwapBox)
+
+
+def test_class_swap_resolves_on_class_and_instance():
+    assert SwapBox[int].get_type() == (int,)
+    assert SwapBox[int](x=1).get_type() == (int,)
+
+
+def test_class_swap_no_field_pollution():
+    assert "__orig_class__" not in {f.name for f in attrs.fields(SwapBox)}
+    assert "orig_class" not in repr(SwapBox[int](x=1))
+    assert "__orig_class__" not in attrs.asdict(SwapBox[int](x=1))
+
+
+def test_class_swap_isinstance_true_but_type_identity_changes():
+    inst = SwapBox[int](x=1)
+    assert isinstance(inst, SwapBox)  # subclass
+    assert type(inst) is not SwapBox  # the documented trade-off
+    assert type(inst).__name__ == "SwapBox"  # repr stays sane
+
+
+def test_class_swap_distinct_parametrizations_dont_bleed():
+    assert SwapBox[int](x=1).get_type() == (int,)
+    assert SwapBox[str](x=2).get_type() == (str,)
+    # same parametrization -> same synthetic class (stable identity)
+    assert type(SwapBox[int](x=1)) is type(SwapBox[int](x=9))
+
+
+def test_class_swap_survives_evolve_copy_deepcopy_pickle():
+    inst = SwapBox[int](x=1)
+    assert attrs.evolve(inst, x=2).get_type() == (int,)
+    assert copy.copy(inst).get_type() == (int,)
+    assert copy.deepcopy(inst).get_type() == (int,)
+    revived = pickle.loads(pickle.dumps(inst))
+    assert revived.get_type() == (int,)
+    assert revived.x == 1
+    assert isinstance(revived, SwapBox)
+
+
+def test_class_swap_on_dataclass_slots_and_manual_slots():
+    @uses_class_swap
+    @dataclass(slots=True)
+    class DC[T]:
+        x: int = 0
+
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, DC)
+
+    assert DC[int](x=1).f() == (int,)
+    assert copy.deepcopy(DC[int](x=5)).f() == (int,)
+
+    @uses_class_swap
+    class Manual[T]:
+        __slots__ = ("x",)
+
+        def __init__(self, x=0):
+            self.x = x
+
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, Manual)
+
+    assert Manual[int](1).f() == (int,)
+    # (pickle needs a module-level class -- covered by SwapBox above)
+    assert copy.deepcopy(Manual[int](3)).f() == (int,)
+
+
+def test_class_swap_suppresses_init_subclass_for_synthetics():
+    calls = []
+
+    class Hook:
+        def __init_subclass__(cls, **kw):
+            super().__init_subclass__(**kw)
+            calls.append(cls.__name__)
+
+    @uses_class_swap
+    @define
+    class Child[T](Hook):
+        x: int = 0
+
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, Child)
+
+    calls.clear()
+    # Building synthetics for these parametrizations must NOT fire Hook's
+    # __init_subclass__ (a synthetic is an implementation detail).
+    Child[int](x=1).f()
+    Child[str](x=2).f()
+    assert calls == []
+
+
+def test_class_swap_unparametrized_instance_falls_back_silently():
+    # ``SwapBox()`` (no [T]) is a legit unparametrized instance: type is the
+    # real class, no synthetic, resolution falls back to the bare class.
+    inst = SwapBox(x=1)
+    assert type(inst) is SwapBox
+    assert inst.get_type() != (int,)
+
+
+# ---------------------------------------------------------------------------
+# Decorators are equivalent to the class-body marker.
+# ---------------------------------------------------------------------------
+
+
+def test_uses_side_table_decorator_equivalent_to_marker():
+    @uses_side_table
+    @define
+    class A[T]:
+        x: int = 0
+
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, A)
+
+    assert A._paramsight_slots == "side_table"
+    assert A[int](x=1).f() == (int,)
+
+
+def test_uses_class_swap_decorator_sets_marker():
+    assert SwapBox._paramsight_slots == "class_swap"
 
 
 if __name__ == "__main__":

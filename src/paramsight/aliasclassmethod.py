@@ -6,6 +6,7 @@ from functools import cache, partial
 from types import GenericAlias
 from typing import Concatenate, cast, overload
 
+from paramsight._class_swap import is_creating_synth
 from paramsight._orig_class import (
     _has_orig_class_storage,
     _slot_strategy,
@@ -72,6 +73,10 @@ def _make_patched_init_subclass(owner):
             return None
 
     def _patched_init_subclass(cls, *a, **kw):
+        # A class_swap synthetic is an implementation detail: don't fire
+        # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
+        if is_creating_synth():
+            return
         super(owner, cls).__init_subclass__(*a, **kw)
         _install_ga_proxy(cls)
         return
