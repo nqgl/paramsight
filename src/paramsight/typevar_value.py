@@ -6,7 +6,15 @@ See :class:`TypeVarValue`.
 from typing import Any
 
 from paramsight._paramsight import get_args_at_base, get_typevar_value
-from paramsight.aliasclassmethod import _install_ga_proxy
+from paramsight.aliasclassmethod import (
+    _install_ga_proxy,
+    _raise_slotted_instance_without_storage,
+)
+from paramsight.slotted_strategies import (
+    _has_orig_class_storage,
+    _slot_strategy,
+    get_orig_class,
+)
 from paramsight.type_utils import _is_typevar, get_parameters
 
 
@@ -97,7 +105,20 @@ class TypeVarValue[T]:
         self, instance: object | None, owner: type | None = None, /
     ) -> type[T]:
         if instance is not None:
-            cls = getattr(instance, "__orig_class__", None) or type(instance)
+            orig = get_orig_class(instance)
+            if orig is not None:
+                cls = orig
+            else:
+                cls = type(instance)
+                # Mirror of ``_TakesAlias.__get__``: a slotted instance with no
+                # storage for ``__orig_class__`` and no opt-in strategy would
+                # silently resolve typevars against the unparametrized class,
+                # masking a real bug -- raise instead.
+                if (
+                    not _has_orig_class_storage(cls)
+                    and _slot_strategy(cls) is None
+                ):
+                    _raise_slotted_instance_without_storage(self._name, cls)
         else:
             cls = owner
         if cls is None:

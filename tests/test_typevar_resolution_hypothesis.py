@@ -127,7 +127,8 @@ class CheckBaseModel2[T](BaseModel, CheckTVCls[T]):
 
 
 @define
-class CheckAttrs[T](CheckTVCls[T]): ...
+class CheckAttrs[T](CheckTVCls[T]):
+    _paramsight_slots = "side_table"
 
 
 class CheckTorch[T](nn.Module, CheckTVCls[T]): ...

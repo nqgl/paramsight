@@ -10,6 +10,12 @@ from paramsight._ta_ref_attr import _TA_REF_ATTR
 from paramsight.alias_super import _super
 from paramsight.ga_proxy import _GAProxy
 from paramsight.inject_locals import inject_locals
+from paramsight.slotted_strategies import (
+    _has_orig_class_storage,
+    _slot_strategy,
+    get_orig_class,
+    is_creating_synth,
+)
 from paramsight.type_utils import _is_pydantic
 
 
@@ -31,10 +37,15 @@ def _is_specialized_generic(cls):
     return False
 
 
-def _make_patched_cgi(owner, parent):
+def _make_patched_cgi(owner):
     cgi = inspect.getattr_static(owner, "__class_getitem__", None)
     if isinstance(cgi, classmethod):
         cgi = cgi.__func__
+    if cgi is not None and getattr(cgi, "__name__", None) == "_patched_cgi":
+        # Already patched (e.g. ``attrs.define(slots=True)`` rebuilds the class
+        # and re-runs ``__set_name__`` over a namespace that already carries
+        # our patched ``__class_getitem__``); don't wrap it again.
+        return None
     if cgi is None:
         bound_cgi = getattr(owner, "__class_getitem__", None)
         if bound_cgi is None:
@@ -62,6 +73,10 @@ def _make_patched_init_subclass(owner):
             return None
 
     def _patched_init_subclass(cls, *a, **kw):
+        # A class_swap synthetic is an implementation detail: don't fire
+        # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
+        if is_creating_synth():
+            return
         super(owner, cls).__init_subclass__(*a, **kw)
         _install_ga_proxy(cls)
         return
@@ -69,41 +84,59 @@ def _make_patched_init_subclass(owner):
     return _patched_init_subclass
 
 
-# def _make_patched_init_subclass_for_attrs(owner):
-#     _orig_init_subclass = inspect.getattr_static(owner, "__attrs_init_subclass__")
-#     if hasattr(_orig_init_subclass, "__func__"):
-#         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
-#             return None
-
-#     def _patched_init_subclass(cls, *a, **kw):
-#         super(owner, cls).__attrs_init_subclass__(*a, **kw)
-#         _install_ga_proxy(cls)
-#         return
-
-#     return _patched_init_subclass
+def _raise_slotted_instance_without_storage(method_name, owner):
+    o = owner.__name__
+    raise TypeError(
+        f"paramsight: ``{o}.{method_name}`` was looked up on an instance of "
+        f"{o}, which is slotted (attrs / @dataclass(slots=True) / manual "
+        f"__slots__) and has no storage for ``__orig_class__``. The instance "
+        f"can't carry its parametrization, so the alias is unrecoverable -- "
+        f"silently falling back to the unparametrized class would yield "
+        f"``NoDefault`` for the typevars, which is almost certainly a bug. "
+        f"Opt in with one of paramsight.slotted_strategies:\n\n"
+        f"  from paramsight.slotted_strategies import (\n"
+        f"      add_field, uses_class_swap, uses_side_table)\n\n"
+        f"  # 1. Real ``__orig_class__`` field; survives "
+        f"attrs.evolve / copy / pickle.\n"
+        f"  #    @add_field must sit *below* @define / @dataclass -- it runs\n"
+        f"  #    first, so the field exists before they scan the body.\n"
+        f"  @define\n"
+        f"  @add_field\n"
+        f"  class {o}[T]:\n"
+        f"      ...\n\n"
+        f"  # 2. Synthetic-subclass swap; no field pollution; survives\n"
+        f"  #    evolve / copy / pickle. Trade-off: ``type(inst) is {o}``\n"
+        f"  #    becomes False (``isinstance`` still works).\n"
+        f"  @uses_class_swap\n"
+        f"  @define\n"
+        f"  class {o}[T]:\n"
+        f"      ...\n\n"
+        f"  # 3. Out-of-band table; no field pollution; does NOT survive\n"
+        f"  #    evolve / copy / pickle; needs weakref-able instances.\n"
+        f"  @uses_side_table\n"
+        f"  @define\n"
+        f"  class {o}[T]:\n"
+        f"      ...\n\n"
+        f"  #    ((2) and (3) are equivalent to ``_paramsight_slots =\n"
+        f"  #    \"class_swap\" / \"side_table\"`` set in the class body.)\n\n"
+        f"  # 4. If you only ever call this method class-side (e.g.\n"
+        f"  #    ``{o}[int].{method_name}(...)``), no opt-in is needed --\n"
+        f"  #    this error fires only at instance lookup time."
+    )
 
 
 def _install_ga_proxy(owner):
     if _is_pydantic(owner):
         return
-
-    if (parent := getattr(owner, "_ga_proxy_installed__", None)) != owner:
-        if "__orig_class__" not in owner.__annotations__:
-            owner.__annotations__["__orig_class__"] = type | None
-            owner.__orig_class__ = None
-        patched_cgi = _make_patched_cgi(owner, parent)
-        if patched_cgi is not None:
-            owner.__class_getitem__ = classmethod(patched_cgi)
-        patched_init_subclass = _make_patched_init_subclass(owner)
-        if patched_init_subclass is not None:
-            # setattr(patched_init_subclass, "_is_patched_init_subclass", True)
-            # setattr(
-            #     patched_init_subclass,
-            #     "_original_init_subclass",
-            #     owner.__init_subclass__,
-            # )
-            owner.__init_subclass__ = classmethod(patched_init_subclass)
-        owner._ga_proxy_installed__ = owner
+    if getattr(owner, "_ga_proxy_installed__", None) == owner:
+        return
+    patched_cgi = _make_patched_cgi(owner)
+    if patched_cgi is not None:
+        owner.__class_getitem__ = classmethod(patched_cgi)
+    patched_init_subclass = _make_patched_init_subclass(owner)
+    if patched_init_subclass is not None:
+        owner.__init_subclass__ = classmethod(patched_init_subclass)
+    owner._ga_proxy_installed__ = owner
 
 
 class _TakesAlias[T, **P, R](classmethod):
@@ -118,10 +151,24 @@ class _TakesAlias[T, **P, R](classmethod):
 
     def __get__(self, instance, owner=None) -> Callable[P, R]:
         if instance is not None:
-            if hasattr(instance, "__orig_class__"):
-                owner = instance.__orig_class__
-            if owner is None:
-                owner = instance.__class__
+            orig = get_orig_class(instance)
+            if orig is not None:
+                owner = orig
+            else:
+                cls = type(instance)
+                # No alias recovered. If the class has storage (slot/field, or
+                # ``__dict__``) or opted into an explicit strategy, this is a
+                # legitimate unparametrized-instance call -- fall back to the
+                # class. Otherwise the instance is slotted-without-storage and
+                # without opt-in: silently returning ``NoDefault`` for the
+                # typevars would mask a real bug, so raise.
+                if (
+                    not _has_orig_class_storage(cls)
+                    and _slot_strategy(cls) is None
+                ):
+                    _raise_slotted_instance_without_storage(self.name, cls)
+                if owner is None:
+                    owner = cls
         return super().__get__(instance, owner)
 
 
