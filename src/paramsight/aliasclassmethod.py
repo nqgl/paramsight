@@ -118,7 +118,7 @@ def _raise_slotted_instance_without_storage(method_name, owner):
         f"  class {o}[T]:\n"
         f"      ...\n\n"
         f"  #    ((2) and (3) are equivalent to ``_paramsight_slots =\n"
-        f"  #    \"class_swap\" / \"side_table\"`` set in the class body.)\n\n"
+        f'  #    "class_swap" / "side_table"`` set in the class body.)\n\n'
         f"  # 4. If you only ever call this method class-side (e.g.\n"
         f"  #    ``{o}[int].{method_name}(...)``), no opt-in is needed --\n"
         f"  #    this error fires only at instance lookup time."

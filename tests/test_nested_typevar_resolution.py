@@ -43,9 +43,7 @@ def test_nested_typevar_via_subclass():
 def test_nested_typevar_via_subscript():
     """Same resolution should hold when starting from the generic alias
     Arch[ArchImplCfg] directly rather than via a subclass."""
-    assert get_args_at_base(Arch[ArchImplCfg], ArchBase) == (
-        CfgBase[ArchImplCfg],
-    )
+    assert get_args_at_base(Arch[ArchImplCfg], ArchBase) == (CfgBase[ArchImplCfg],)
 
 
 def test_nested_typevar_intermediate_resolution_still_works():
@@ -69,9 +67,7 @@ class TwoLevelImpl(TwoLevelArch[ArchImplCfg]): ...
 
 
 def test_doubly_nested_typevar_via_subclass():
-    assert get_args_at_base(TwoLevelImpl, ArchBase) == (
-        CfgBase[Outer[ArchImplCfg]],
-    )
+    assert get_args_at_base(TwoLevelImpl, ArchBase) == (CfgBase[Outer[ArchImplCfg]],)
 
 
 def test_doubly_nested_typevar_via_subscript():

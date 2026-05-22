@@ -377,9 +377,7 @@ def test_declared_field_on_frozen_uses_object_setattr_bypass():
 def test_declared_field_with_attrs_field_can_hide_from_repr_and_eq():
     @define
     class A[T]:
-        __orig_class__: type | None = attrs.field(
-            default=None, repr=False, eq=False
-        )
+        __orig_class__: type | None = attrs.field(default=None, repr=False, eq=False)
         x: int = 0
 
         @takes_alias

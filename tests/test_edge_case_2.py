@@ -46,9 +46,7 @@ class OldStyleArchImpl(OldStyleArch[ArchImplCfg]): ...
 
 
 def test_nested_generic_arg_resolves_from_specialized_alias():
-    assert get_args_at_base(Arch[ArchImplCfg], ArchBase) == (
-        CfgBase[ArchImplCfg],
-    )
+    assert get_args_at_base(Arch[ArchImplCfg], ArchBase) == (CfgBase[ArchImplCfg],)
 
 
 def test_nested_generic_arg_resolves_through_concrete_subclass():
@@ -56,21 +54,15 @@ def test_nested_generic_arg_resolves_through_concrete_subclass():
 
 
 def test_nested_generic_arg_uses_each_concrete_subclass_specialization():
-    assert get_args_at_base(OtherArchImpl, ArchBase) == (
-        CfgBase[OtherArchImplCfg],
-    )
+    assert get_args_at_base(OtherArchImpl, ArchBase) == (CfgBase[OtherArchImplCfg],)
 
 
 def test_nested_generic_arg_resolves_unspecialized_default():
-    assert get_args_at_base(DefaultArchImpl, ArchBase) == (
-        CfgBase[ArchImplCfg],
-    )
+    assert get_args_at_base(DefaultArchImpl, ArchBase) == (CfgBase[ArchImplCfg],)
 
 
 def test_nested_generic_arg_resolves_old_style_generic_subclass():
-    assert get_args_at_base(OldStyleArchImpl, ArchBase) == (
-        CfgBase[ArchImplCfg],
-    )
+    assert get_args_at_base(OldStyleArchImpl, ArchBase) == (CfgBase[ArchImplCfg],)
 
 
 if __name__ == "__main__":

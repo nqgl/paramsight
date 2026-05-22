@@ -101,9 +101,7 @@ class TypeVarValue[T]:
         # routes through the proxy that respects ``_acm_takes_alias``.
         _install_ga_proxy(owner)
 
-    def __get__(
-        self, instance: object | None, owner: type | None = None, /
-    ) -> type[T]:
+    def __get__(self, instance: object | None, owner: type | None = None, /) -> type[T]:
         if instance is not None:
             orig = get_orig_class(instance)
             if orig is not None:
