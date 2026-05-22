@@ -101,21 +101,22 @@ class TypeVarValue[T]:
         # routes through the proxy that respects ``_acm_takes_alias``.
         _install_ga_proxy(owner)
 
-    def __get__(
-        self, instance: object | None, owner: type | None = None, /
-    ) -> type[T]:
+    def __get__(self, instance: object | None, owner: type | None = None, /) -> type[T]:
         if instance is not None:
             orig = get_orig_class(instance)
             if orig is not None:
                 cls = orig
             else:
                 cls = type(instance)
-                # Mirror of ``_TakesAlias.__get__``: a slotted instance with no
-                # storage for ``__orig_class__`` and no opt-in strategy would
-                # silently resolve typevars against the unparametrized class,
-                # masking a real bug -- raise instead.
+                # Mirror of ``_TakesAlias.__get__``: raise only when losing the
+                # alias loses information -- ``cls`` still has *free* typevars,
+                # has no ``__orig_class__`` storage, and no opt-in strategy.
+                # A non-generic class, or a concrete subclass that already binds
+                # its typevars via the MRO (``Concrete(Base[int])``), resolves
+                # fine from ``type(instance)`` and must not raise.
                 if (
-                    not _has_orig_class_storage(cls)
+                    get_parameters(cls)
+                    and not _has_orig_class_storage(cls)
                     and _slot_strategy(cls) is None
                 ):
                     _raise_slotted_instance_without_storage(self._name, cls)

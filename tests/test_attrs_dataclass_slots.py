@@ -33,7 +33,7 @@ import attrs
 import pytest
 from attrs import define, frozen
 
-from paramsight import get_args_at_base, takes_alias
+from paramsight import TypeVarValue, get_args_at_base, takes_alias
 from paramsight.slotted_strategies import (
     add_field,
     uses_class_swap,
@@ -146,6 +146,106 @@ def test_non_slotted_dataclass_needs_no_strategy():
 
     assert A[int].f() == (int,)
     assert A[int](x=1).f() == (int,)
+
+
+# ---------------------------------------------------------------------------
+# The raise must NOT fire when there is nothing to recover: a slotted class
+# with no *free* typevars (a non-generic class, or a concrete subclass that
+# already binds the base's typevars via its MRO) resolves fine straight from
+# ``type(instance)`` -- no instance alias is needed.
+# ---------------------------------------------------------------------------
+
+
+def test_non_generic_slotted_class_instance_lookup_does_not_raise():
+    # A non-generic ``@define`` class has no typevars, so there is no
+    # parametrization to lose. Instance-side ``@takes_alias`` must fall back to
+    # the class, not raise the slotted-without-storage error.
+    @define
+    class A:
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return cls
+
+    assert A.f() is A
+    assert A().f() is A
+
+
+def test_concrete_slotted_subclass_resolves_from_mro_on_instance():
+    # ``Concrete(Base[int])`` encodes ``int`` in its MRO (``__orig_bases__``);
+    # an instance carries no alias of its own and needs none. Instance-side
+    # lookup must resolve against ``type(instance)``, not raise.
+    @define
+    class Base[T]:
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, Base)
+
+    @define
+    class Concrete(Base[int]):
+        pass
+
+    assert Concrete.f() == (int,)
+    assert Concrete().f() == (int,)
+
+
+def test_concrete_slotted_subclass_resolves_typevarvalue_on_instance():
+    # Same edge case via the ``TypeVarValue`` descriptor -- the fix gates both
+    # instance-side ``__get__`` sites.
+    @define
+    class Base[T]:
+        value_type = TypeVarValue[T]()
+
+    @define
+    class Concrete(Base[int]):
+        pass
+
+    assert Concrete.value_type is int
+    assert Concrete().value_type is int
+
+
+def test_slotted_subclass_with_free_typevar_still_raises():
+    # Regression guard: a subclass that still has a *free* typevar genuinely
+    # loses its parametrization when a slotted instance has no storage, so the
+    # raise must still fire here.
+    @define
+    class Base[T]:
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, Base)
+
+    @define
+    class Partial[U](Base[U]):
+        pass
+
+    assert Partial[int].f() == (int,)
+    with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+        Partial[int]().f()
+
+
+def test_slotted_subclass_binding_base_typevar_but_adding_own_still_raises():
+    # ``Sub[U](Base[int])`` binds ``Base``'s typevar (recoverable from the MRO)
+    # but adds its *own* free ``U``. An instance built as ``Sub[str]()`` really
+    # carried ``U=str``; a slotted instance with no storage drops it, so a
+    # consumer that resolves ``Sub``'s typevars would silently get ``NoDefault``.
+    # The raise must still fire -- even though the method below only needs
+    # ``Base``'s (recoverable) typevar, we cannot assume callers stop there.
+    @define
+    class Base[T]:
+        @takes_alias
+        @classmethod
+        def f(cls):
+            return get_args_at_base(cls, Base)
+
+    @define
+    class Sub[U](Base[int]):
+        pass
+
+    assert Sub[str].f() == (int,)  # class-side: fine
+    with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+        Sub[str]().f()
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +377,7 @@ def test_declared_field_on_frozen_uses_object_setattr_bypass():
 def test_declared_field_with_attrs_field_can_hide_from_repr_and_eq():
     @define
     class A[T]:
-        __orig_class__: type | None = attrs.field(
-            default=None, repr=False, eq=False
-        )
+        __orig_class__: type | None = attrs.field(default=None, repr=False, eq=False)
         x: int = 0
 
         @takes_alias

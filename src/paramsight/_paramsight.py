@@ -97,10 +97,7 @@ def _resolve(
         # In that case fall back to the (already-substituted) args we walked to.
         if not params and args:
             return args
-        return tuple(
-            subs[p] if _is_typevar(p) and p in subs else p
-            for p in params
-        )
+        return tuple(subs[p] if _is_typevar(p) and p in subs else p for p in params)
 
     for base in get_original_bases(origin):
         base_origin = get_origin_robust(base) if is_generic_alias(base) else base

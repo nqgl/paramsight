@@ -16,7 +16,7 @@ from paramsight.slotted_strategies import (
     get_orig_class,
     is_creating_synth,
 )
-from paramsight.type_utils import _is_pydantic
+from paramsight.type_utils import _is_pydantic, get_parameters
 
 
 def _is_specialized_generic(cls):
@@ -118,7 +118,7 @@ def _raise_slotted_instance_without_storage(method_name, owner):
         f"  class {o}[T]:\n"
         f"      ...\n\n"
         f"  #    ((2) and (3) are equivalent to ``_paramsight_slots =\n"
-        f"  #    \"class_swap\" / \"side_table\"`` set in the class body.)\n\n"
+        f'  #    "class_swap" / "side_table"`` set in the class body.)\n\n'
         f"  # 4. If you only ever call this method class-side (e.g.\n"
         f"  #    ``{o}[int].{method_name}(...)``), no opt-in is needed --\n"
         f"  #    this error fires only at instance lookup time."
@@ -156,14 +156,18 @@ class _TakesAlias[T, **P, R](classmethod):
                 owner = orig
             else:
                 cls = type(instance)
-                # No alias recovered. If the class has storage (slot/field, or
-                # ``__dict__``) or opted into an explicit strategy, this is a
-                # legitimate unparametrized-instance call -- fall back to the
-                # class. Otherwise the instance is slotted-without-storage and
-                # without opt-in: silently returning ``NoDefault`` for the
-                # typevars would mask a real bug, so raise.
+                # No alias recovered. Raise only if losing the alias actually
+                # loses information: ``cls`` must still have *free* typevars.
+                # A non-generic class, or a concrete subclass that already
+                # binds the base's typevars via its MRO (``Concrete(Base[int])``)
+                # resolves fine straight from ``type(instance)`` -- no instance
+                # alias is needed. When ``cls`` does have free typevars and is
+                # slotted-without-storage and without an opt-in strategy,
+                # silently returning ``NoDefault`` for them would mask a real
+                # bug, so raise.
                 if (
-                    not _has_orig_class_storage(cls)
+                    get_parameters(cls)
+                    and not _has_orig_class_storage(cls)
                     and _slot_strategy(cls) is None
                 ):
                     _raise_slotted_instance_without_storage(self.name, cls)
