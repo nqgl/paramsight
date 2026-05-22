@@ -110,12 +110,15 @@ class TypeVarValue[T]:
                 cls = orig
             else:
                 cls = type(instance)
-                # Mirror of ``_TakesAlias.__get__``: a slotted instance with no
-                # storage for ``__orig_class__`` and no opt-in strategy would
-                # silently resolve typevars against the unparametrized class,
-                # masking a real bug -- raise instead.
+                # Mirror of ``_TakesAlias.__get__``: raise only when losing the
+                # alias loses information -- ``cls`` still has *free* typevars,
+                # has no ``__orig_class__`` storage, and no opt-in strategy.
+                # A non-generic class, or a concrete subclass that already binds
+                # its typevars via the MRO (``Concrete(Base[int])``), resolves
+                # fine from ``type(instance)`` and must not raise.
                 if (
-                    not _has_orig_class_storage(cls)
+                    get_parameters(cls)
+                    and not _has_orig_class_storage(cls)
                     and _slot_strategy(cls) is None
                 ):
                     _raise_slotted_instance_without_storage(self._name, cls)
