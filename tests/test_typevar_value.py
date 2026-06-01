@@ -13,6 +13,7 @@ from typing import (
     ForwardRef,
     Generic,
     TypeVar,
+    Unpack,
     assert_type,
     get_args,
     get_origin,
@@ -472,6 +473,28 @@ def test_typevartuple_absorbs_middle_args_around_ordinary_params():
     assert _PrefixSuffix[int, str, bytes, float].u_type is float
 
 
+class _MixedEmpty[T, *Ts](_VBase[tuple[T, *Ts]]): ...
+
+
+def test_typevartuple_explicit_unpacked_tuple_arg_flattens():
+    # Subscribing a ``*Ts`` with a *fixed* unpacked tuple (either spelling) must
+    # flatten into the absorbed run, not nest as a single argument. ``*tuple[...]``
+    # is an ``__unpacked__`` GenericAlias, distinct from ``Unpack[...]``; both apply.
+    assert _Variadic[*tuple[int, str]].x_type == tuple[int, str]
+    # the Unpack[...] spelling is the point of this assertion -- keep it verbatim
+    assert _Variadic[Unpack[tuple[int, str]]].x_type == tuple[int, str]  # noqa: UP044
+    # flattened among ordinary prefix/suffix members too
+    assert _MiddleVariadic[*tuple[bool, bytes]].x_type == tuple[int, bool, bytes, str]
+
+
+def test_typevartuple_explicit_empty_marker_with_ordinary_param():
+    # ``C[int, ()]`` -- an explicit empty ``*Ts`` next to an ordinary param --
+    # absorbs nothing (CPython leaves a bare ``()`` marker in __args__); the empty
+    # run must not leak as a one-tuple ``((),)`` -> ``tuple[int, ()]``.
+    assert _MixedEmpty[int, ()].x_type == tuple[int]
+    assert _MixedEmpty[int, str, bytes].x_type == tuple[int, str, bytes]
+
+
 class _PBase[X]:
     x_type = TypeVarValue[X]()
     x_opt = TypeVarValueOption[X]()
@@ -529,6 +552,39 @@ def test_concatenate_with_typevartuple_flattens_prefix_and_expands_tail():
 
 def test_concatenate_with_typevartuple_unresolved_when_bare():
     assert _ConcatVariadic.x_opt is None
+
+
+def test_paramspec_list_members_coerced_like_subscription():
+    # Members of an explicit ParamSpec list must be coerced the way scalar args
+    # are (``None`` -> ``NoneType``, ``"Foo"`` -> ``ForwardRef``), so the list
+    # spelling agrees with the shorthand rather than leaking raw source values.
+    listed = _ParamSpecArch[[None, "Foo"]].x_type  # noqa: F821  # str -> ForwardRef
+    assert _is_callable_of(listed, [NoneType, ForwardRef("Foo")], int)
+
+
+class _ParamSpecListDefaultBare[T = int, **P = [T]](_PBase[Callable[P, int]]): ...
+
+
+def test_paramspec_list_default_resolves_on_bare_class():
+    # Bare class: ``T`` falls back to its default ``int`` and ``**P`` to ``[T]``.
+    # A ParamSpec default is a *parameter list*, so it must be normalized (``[T]``
+    # -> ``[int]``) rather than sent through the scalar path and left unresolved.
+    assert _is_callable_of(_ParamSpecListDefaultBare.x_type, [int], int)
+
+
+class _ConcatEllipsis[**P](_PBase[Callable[Concatenate[int, P], str]]): ...
+
+
+def test_concatenate_prefix_preserved_when_paramspec_is_ellipsis():
+    # ``Concatenate[int, P]`` with ``P`` bound to ``...`` must keep the ``int``
+    # prefix (``Concatenate[int, ...]`` is a valid spec), not collapse to a bare
+    # ``...`` that drops the leading argument.
+    resolved = _ConcatEllipsis[...].x_type
+    assert get_origin(resolved) is Callable
+    params, ret = get_args(resolved)
+    assert ret is str
+    assert get_origin(params) is Concatenate
+    assert get_args(params) == (int, Ellipsis)
 
 
 # ---------------------------------------------------------------------------

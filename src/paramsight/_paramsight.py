@@ -147,11 +147,33 @@ def _substitute_typevars(value: Any, subs: dict[Any, Any]) -> Any:
     return origin.__class_getitem__(subscript)  # type: ignore[attr-defined]
 
 
+def _fixed_unpack_members(x: Any, subs: dict[Any, Any]) -> tuple[Any, ...] | None:
+    """The members of a *fixed-length* unpacked tuple -- ``*tuple[int, str]`` (an
+    ``__unpacked__`` ``types.GenericAlias``) or ``Unpack[tuple[int, str]]`` --
+    substituted and coerced. Returns None for anything that isn't one: a plain
+    (non-unpacked) ``tuple[...]``, an unbounded ``*tuple[int, ...]``, or ``*Ts``
+    (a ``TypeVarTuple`` unpack, which binds through ``subs`` instead)."""
+    if _is_unpack(x):  # ``Unpack[...]`` spelling
+        inner = _unpack_inner(x)
+    elif getattr(x, "__unpacked__", False):  # ``*tuple[...]`` spelling
+        inner = x
+    else:
+        return None
+    if typing.get_origin(inner) is not tuple:  # e.g. ``*Ts`` -> inner is TypeVarTuple
+        return None
+    members = get_args_robust(inner)
+    if any(m is Ellipsis for m in members):  # unbounded ``*tuple[int, ...]``
+        return None
+    return tuple(_substitute_typevars(coerce_to_type_form(m), subs) for m in members)
+
+
 def _subst_args(args: tuple[Any, ...], subs: dict[Any, Any]) -> tuple[Any, ...]:
-    """Substitute a sequence of type arguments, flattening any ``*Ts`` whose
-    ``TypeVarTuple`` is bound to a tuple of types: ``tuple[int, *Ts, str]`` with
-    ``Ts = (a, b)`` yields ``(int, a, b, str)``. A still-unbound ``*Ts`` is left
-    in place (with its inner re-substituted) so it reads as unresolved."""
+    """Substitute a sequence of type arguments, flattening any unpack whose
+    contents are known: a ``*Ts`` bound to a tuple of types (``tuple[int, *Ts,
+    str]`` with ``Ts = (a, b)`` -> ``(int, a, b, str)``) or a fixed unpacked tuple
+    (``*tuple[int, str]`` / ``Unpack[tuple[int, str]]`` -> ``int, str``). A
+    still-unbound ``*Ts`` is left in place (with its inner re-substituted) so it
+    reads as unresolved."""
     out: list[Any] = []
     for a in args:
         if _is_unpack(a):
@@ -163,6 +185,10 @@ def _subst_args(args: tuple[Any, ...], subs: dict[Any, Any]) -> tuple[Any, ...]:
             ):
                 out.extend(subs[inner])
                 continue
+        members = _fixed_unpack_members(a, subs)
+        if members is not None:
+            out.extend(members)
+            continue
         out.append(_substitute_typevars(a, subs))
     return tuple(out)
 
@@ -175,9 +201,12 @@ def _normalize_paramspec_arg(arg: Any, subs: dict[Any, Any]) -> Any:
     ``[p, ...]`` list form."""
     if arg is Ellipsis or _is_paramspec(arg):
         return arg
+    # Coerce each member the way subscription coerces scalar args (``None`` ->
+    # ``NoneType``, ``"Foo"`` -> ``ForwardRef``) so the explicit list spelling
+    # ``C[[None, "Foo"]]`` agrees with the shorthand ``C[None, "Foo"]``.
     if isinstance(arg, (tuple, list)):
-        return tuple(_substitute_typevars(a, subs) for a in arg)
-    return (_substitute_typevars(arg, subs),)
+        return tuple(_substitute_typevars(coerce_to_type_form(a), subs) for a in arg)
+    return (_substitute_typevars(coerce_to_type_form(arg), subs),)
 
 
 def _subst_concatenate(conc: Any, subs: dict[Any, Any]) -> Any:
@@ -194,6 +223,10 @@ def _subst_concatenate(conc: Any, subs: dict[Any, Any]) -> Any:
     if isinstance(tail_sub, tuple):  # ParamSpec -> a concrete parameter list
         return new_prefix + list(tail_sub)
     if tail_sub is Ellipsis:
+        # ``Concatenate[int, ...]`` is a valid parameter spec: keep the resolved
+        # prefix. Only a prefix-less tail collapses to a bare ``...``.
+        if new_prefix:
+            return typing.Concatenate[tuple(new_prefix + [...])]
         return Ellipsis
     if _is_paramspec(tail_sub):  # still symbolic -> rebuild a Concatenate
         return typing.Concatenate[tuple(new_prefix + [tail_sub])]
@@ -282,6 +315,13 @@ def _build_subs(
                 members = _typevartuple_default_members(default, subs)
                 subs[p] = members if members is not None else _NODEFAULT
                 return
+            if _is_paramspec(p):
+                # A ParamSpec default is a parameter list (``**P = [T]``, ``...``,
+                # or another ParamSpec), not a scalar type form; normalize it the
+                # same way an explicit ParamSpec arg is normalized so it resolves
+                # against earlier bindings (``[T]`` -> ``[int]`` when ``T = int``).
+                subs[p] = _normalize_paramspec_arg(default, subs)
+                return
             # Normalize the default the way subscription normalizes an explicit
             # arg (``None`` -> ``NoneType``, ``"Foo"`` -> ``ForwardRef('Foo')``),
             # then resolve any typevars it references against the bindings so far.
@@ -322,6 +362,11 @@ def _build_subs(
         absorbed = tuple(
             _substitute_typevars(a, subs) for a in args[tvt_idx : tvt_idx + n_absorbed]
         )
+        if absorbed == ((),):
+            # CPython's explicit empty-TypeVarTuple marker: ``C[int, ()]`` puts a
+            # bare ``()`` in ``__args__`` for an empty ``*Ts``. That means zero
+            # absorbed types, not a one-tuple containing the empty tuple.
+            absorbed = ()
         if any(_is_unpack(a) or a is _NODEFAULT for a in absorbed):
             # An absorbed ``*Us`` whose TypeVarTuple stayed unbound (or a NoDefault
             # member) leaves the run's length indeterminate, so the whole binding
