@@ -167,7 +167,10 @@ def _typevartuple_default_members(
     members = get_args_robust(default)
     if any(m is Ellipsis for m in members):
         return None
-    return tuple(_substitute_typevars(m, subs) for m in members)
+    # Coerce members the way subscription does (``None`` -> ``NoneType``,
+    # ``"Foo"`` -> ``ForwardRef``) so a fixed default matches the explicit
+    # specialization ``C[None, "Foo"]``, then resolve any typevars they reference.
+    return tuple(_substitute_typevars(coerce_to_type_form(m), subs) for m in members)
 
 
 def _build_subs(
@@ -252,8 +255,16 @@ def _build_subs(
             )
     tvt = params[tvt_idx]
     if subscripted and len(args) >= len(params) - 1:
-        absorbed = args[tvt_idx : tvt_idx + n_absorbed]
-        subs[tvt] = tuple(_substitute_typevars(a, subs) for a in absorbed)
+        absorbed = tuple(
+            _substitute_typevars(a, subs) for a in args[tvt_idx : tvt_idx + n_absorbed]
+        )
+        if any(_is_unpack(a) or a is _NODEFAULT for a in absorbed):
+            # An absorbed ``*Us`` whose TypeVarTuple stayed unbound (or a NoDefault
+            # member) leaves the run's length indeterminate, so the whole binding
+            # is unresolved -- not a concrete tuple that merely contains the hole.
+            subs[tvt] = _NODEFAULT
+        else:
+            subs[tvt] = absorbed
     else:
         # Bare (unsubscripted) class, or too few args: ``*Ts`` is unspecified, so
         # treat it as unfilled (-> unresolved) rather than an empty binding,

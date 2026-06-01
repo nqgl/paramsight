@@ -4,6 +4,7 @@ Covers runtime resolution and (via ``typing.assert_type``, which is a runtime
 no-op but checked by static type checkers) the narrowed ``type[T]`` surface.
 """
 
+import typing
 from collections.abc import Callable
 from types import GenericAlias, NoneType
 from typing import (
@@ -423,6 +424,33 @@ def test_typevartuple_unbounded_default_is_unresolved_not_corrupt():
     # An unbounded ``*tuple[int, ...]`` default can't expand into a fixed run, so
     # it reads as unresolved rather than producing a malformed nested unpack.
     assert _UnboundedDefaultVariadic.x_opt is None
+
+
+class _FwdBase[*Ts]: ...
+
+
+class _FwdChild[*Us](_FwdBase[*Us]): ...
+
+
+def test_bare_typevartuple_forwarding_resolves_to_unresolved_sentinel():
+    # A bare class forwarding its *Us into a base's *Ts is unresolved -- the
+    # absorbed run still holds an un-flattened Unpack, so the binding must be the
+    # NoDefault sentinel, not a concrete one-element tuple ``((Unpack[Us],),)``.
+    assert get_args_at_base(_FwdChild, _FwdBase) == (typing.NoDefault,)
+
+
+class Sentinel: ...  # forward-ref target; paramsight keeps it an unevaluated ref
+
+
+class _SrcFormDefault[*Ts = *tuple[None, "Sentinel"]](_VBase[tuple[*Ts]]): ...
+
+
+def test_typevartuple_fixed_default_members_coerced_like_subscription():
+    # Source-form members in a fixed default must be coerced the same way the
+    # explicit specialization is (None -> NoneType, "Sentinel" -> ForwardRef --
+    # a ref, never evaluated to the Sentinel class).
+    assert _SrcFormDefault.x_type == tuple[NoneType, ForwardRef("Sentinel")]
+    assert _SrcFormDefault.x_type == _SrcFormDefault[None, "Sentinel"].x_type
 
 
 class _TwoBase[A, B]:
