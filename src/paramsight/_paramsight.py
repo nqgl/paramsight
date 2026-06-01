@@ -8,7 +8,11 @@ from typing import Any
 from paramsight.type_utils import (
     TypeVar,
     _get_typevar_default,
+    _is_paramspec,
     _is_typevar,
+    _is_typevartuple,
+    _is_unpack,
+    _unpack_inner,
     coerce_to_type_form,
     get_args_robust,
     get_origin_robust,
@@ -29,7 +33,7 @@ def _raise_unsupported_type_form(value: Any, origin: Any) -> None:
     )
 
 
-def _substitute_typevars(value: Any, subs: dict[TypeVar, Any]) -> Any:
+def _substitute_typevars(value: Any, subs: dict[Any, Any]) -> Any:
     """Recursively substitute typevars inside a type, generic alias, union, or
     typing special form (``Callable``, ``Annotated``, ...).
 
@@ -44,6 +48,11 @@ def _substitute_typevars(value: Any, subs: dict[TypeVar, Any]) -> Any:
     if value is None:
         return None
     if _is_typevar(value):
+        return subs.get(value, value)
+    if _is_paramspec(value):
+        # A ParamSpec binds to a parameter list; surface its binding (a tuple of
+        # types, ``...``, or -- if unbound -- itself). The Callable branch turns a
+        # bound tuple into the ``[p, ...]`` list form.
         return subs.get(value, value)
     if not (is_generic_alias(value) or isinstance(value, UnionType)):
         return value
@@ -73,9 +82,22 @@ def _substitute_typevars(value: Any, subs: dict[TypeVar, Any]) -> Any:
         params, ret = get_args_robust(value)
         new_ret = _substitute_typevars(ret, subs)
         if isinstance(params, list):
-            new_params = [_substitute_typevars(p, subs) for p in params]
+            # ``[p, ...]`` -- substitute each, flattening any ``*Ts`` (PEP 646
+            # permits ``Callable[[int, *Ts], R]``).
+            new_params = list(_subst_args(tuple(params), subs))
         else:
-            new_params = _substitute_typevars(params, subs)  # Ellipsis / ParamSpec
+            # ``...`` or a ParamSpec. A ParamSpec bound to a parameter list comes
+            # back as a tuple, which Callable wants in ``[p, ...]`` list form.
+            sub = _substitute_typevars(params, subs)
+            if _is_paramspec(params) and isinstance(sub, tuple):
+                new_params = list(sub)
+            else:
+                new_params = sub
+        if new_params is _NODEFAULT or new_ret is _NODEFAULT:
+            # An unresolved parameter list or return type can't be expressed as a
+            # Callable (``Callable[NoDefault, int]`` is invalid), so the whole
+            # form is unresolved.
+            return _NODEFAULT
         if new_params == params and new_ret == ret:
             return value
         return cabc.Callable[new_params, new_ret]  # type: ignore[valid-type]
@@ -101,65 +123,155 @@ def _substitute_typevars(value: Any, subs: dict[TypeVar, Any]) -> Any:
     if origin is None:
         return value
     args = get_args_robust(value)
-    new_args = tuple(_substitute_typevars(a, subs) for a in args)
+    new_args = _subst_args(args, subs)
     if new_args == args:
         return value
     subscript = new_args[0] if len(new_args) == 1 else new_args
     return origin.__class_getitem__(subscript)  # type: ignore[attr-defined]
 
 
+def _subst_args(args: tuple[Any, ...], subs: dict[Any, Any]) -> tuple[Any, ...]:
+    """Substitute a sequence of type arguments, flattening any ``*Ts`` whose
+    ``TypeVarTuple`` is bound to a tuple of types: ``tuple[int, *Ts, str]`` with
+    ``Ts = (a, b)`` yields ``(int, a, b, str)``. A still-unbound ``*Ts`` is left
+    in place (with its inner re-substituted) so it reads as unresolved."""
+    out: list[Any] = []
+    for a in args:
+        if _is_unpack(a):
+            inner = _unpack_inner(a)
+            if (
+                _is_typevartuple(inner)
+                and inner in subs
+                and subs[inner] is not _NODEFAULT
+            ):
+                out.extend(subs[inner])
+                continue
+        out.append(_substitute_typevars(a, subs))
+    return tuple(out)
+
+
+def _typevartuple_default_members(
+    default: Any, subs: dict[Any, Any]
+) -> tuple[Any, ...] | None:
+    """The fixed members of a ``TypeVarTuple`` default (``*Ts = *tuple[int, str]``
+    -> ``(int, str)``), substituted against ``subs``. Returns None when the
+    default isn't a fixed-length unpacked tuple (e.g. an unbounded
+    ``*tuple[int, ...]``), which we can't expand into an absorbed run.
+
+    The ``*tuple[...]`` spelling stores the tuple alias directly; the
+    ``Unpack[tuple[...]]`` spelling wraps it -- unwrap that first."""
+    if _is_unpack(default):
+        default = _unpack_inner(default)
+    if typing.get_origin(default) is not tuple:
+        return None
+    members = get_args_robust(default)
+    if any(m is Ellipsis for m in members):
+        return None
+    return tuple(_substitute_typevars(m, subs) for m in members)
+
+
 def _build_subs(
     origin: type,
     args: tuple[Any, ...],
     return_bound_as_fallback: bool,
-) -> dict[TypeVar, Any]:
-    """Bind ``origin``'s typevars to either positional args, defaults, or
-    (when requested) bounds. Typevars with no resolution map to NoDefault so
-    that they propagate as the unresolved sentinel through nested aliases."""
-    subs: dict[TypeVar, Any] = {}
-    for i, p in enumerate(get_parameters(origin)):
-        if not _is_typevar(p):
-            continue
-        if i < len(args):
-            # Resolve the arg against the bindings accumulated so far. Usually a
-            # no-op, but a PEP 696 default that Python auto-filled into
-            # ``__args__`` arrives as the *raw, unsubstituted* typevar -- ``C[int]``
-            # on ``class C[T, U = T]`` yields args ``(int, T)`` -- and that ``T``
-            # must resolve to ``int``. (Params are walked in declaration order and
-            # PEP 696 only lets a default reference *earlier* params, so the
-            # referenced binding is always already present.)
-            subs[p] = _substitute_typevars(args[i], subs)
-            continue
+    subscripted: bool,
+) -> dict[Any, Any]:
+    """Bind ``origin``'s type parameters to positional args, defaults, or (when
+    requested) bounds. Parameters with no resolution map to NoDefault so that
+    they propagate as the unresolved sentinel through nested aliases.
+
+    A ``TypeVarTuple`` (``*Ts``) is variadic: it absorbs the *middle* args, with
+    the ordinary parameters before and after it binding around the absorbed run
+    (``class C[T, *Ts, U]`` with ``C[int, str, bytes, float]`` gives ``T=int``,
+    ``Ts=(str, bytes)``, ``U=float``). ``ParamSpec`` binds positionally like an
+    ordinary parameter, to a single parameter-list arg.
+
+    ``subscripted`` says whether we arrived via a subscription (``origin[...]``,
+    including an explicitly empty ``origin[()]``) rather than a bare, unspecialized
+    class. It only matters for a TypeVarTuple, which can legitimately bind to zero
+    types: ``C[()]`` makes ``*Ts`` empty, but bare ``C`` leaves it *unresolved*.
+    """
+    subs: dict[Any, Any] = {}
+    params = list(get_parameters(origin))
+
+    def bind_positional(p: Any, arg: Any) -> None:
+        # Resolve the arg against bindings so far. Usually a no-op, but a PEP 696
+        # default Python auto-filled into ``__args__`` arrives as the *raw*
+        # typevar -- ``C[int]`` on ``class C[T, U = T]`` yields args ``(int, T)``
+        # -- and that ``T`` must resolve to ``int``. Declaration order guarantees
+        # the referenced binding is already present.
+        subs[p] = _substitute_typevars(arg, subs)
+
+    def bind_unfilled(p: Any) -> None:
+        # No positional arg: fall back to default, then (optionally) bound, then
+        # the unresolved sentinel.
         default = _get_typevar_default(p)
         if default is not _NODEFAULT:
+            if _is_typevartuple(p):
+                # A TypeVarTuple's default is an unpacked tuple (``*Ts =
+                # *tuple[int, str]``); bind its fixed members so it expands like an
+                # absorbed arg run. A non-fixed default (``*tuple[int, ...]``) can't
+                # be expanded that way, so leave it unresolved rather than corrupt.
+                members = _typevartuple_default_members(default, subs)
+                subs[p] = members if members is not None else _NODEFAULT
+                return
             # Normalize the default the way subscription normalizes an explicit
             # arg (``None`` -> ``NoneType``, ``"Foo"`` -> ``ForwardRef('Foo')``),
-            # so ``C`` and ``C[default]`` agree (see ``coerce_to_type_form``),
-            # *then* resolve any typevars the default references against the
-            # bindings accumulated so far. With ``class C[T, U = T]`` and
-            # ``C[int]``, ``U``'s default ``T`` must become ``int`` rather than
-            # leak the raw typevar. Params are walked in declaration order, so
-            # earlier bindings (here ``T``) are already in ``subs``. Coerce
-            # *before* substituting: ``_substitute_typevars`` passes ``None``
-            # straight through, so ``None`` must already be ``NoneType``.
+            # then resolve any typevars it references against the bindings so far.
+            # Coerce *before* substituting: ``_substitute_typevars`` passes
+            # ``None`` straight through, so ``None`` must already be ``NoneType``.
             subs[p] = _substitute_typevars(coerce_to_type_form(default), subs)
-            continue
+            return
         if return_bound_as_fallback:
             bound = getattr(p, "__bound__", None)
             if bound is not None:
-                # Same treatment as the default branch: a bound is stored in
-                # source form too (``T: "Foo"`` -> the bare string) and may
-                # likewise reference an earlier typevar.
                 subs[p] = _substitute_typevars(coerce_to_type_form(bound), subs)
-                continue
+                return
         subs[p] = _NODEFAULT
+
+    def bindable(p: Any) -> bool:
+        return _is_typevar(p) or _is_paramspec(p)
+
+    tvt_idx = next((i for i, p in enumerate(params) if _is_typevartuple(p)), None)
+
+    if tvt_idx is None:
+        for i, p in enumerate(params):
+            if not bindable(p):
+                continue
+            bind_positional(p, args[i]) if i < len(args) else bind_unfilled(p)
+        return subs
+
+    # ``*Ts`` present: the ordinary params before it bind to the leading args, the
+    # ones after it to the trailing args, and it absorbs whatever is left between.
+    n_suffix = len(params) - tvt_idx - 1
+    n_absorbed = max(0, len(args) - (len(params) - 1))
+    for i in range(tvt_idx):
+        if bindable(params[i]):
+            bind_positional(params[i], args[i]) if i < len(args) else bind_unfilled(
+                params[i]
+            )
+    tvt = params[tvt_idx]
+    if subscripted and len(args) >= len(params) - 1:
+        absorbed = args[tvt_idx : tvt_idx + n_absorbed]
+        subs[tvt] = tuple(_substitute_typevars(a, subs) for a in absorbed)
+    else:
+        # Bare (unsubscripted) class, or too few args: ``*Ts`` is unspecified, so
+        # treat it as unfilled (-> unresolved) rather than an empty binding,
+        # matching how a bare ``C[T]`` leaves ``T`` unresolved.
+        bind_unfilled(tvt)
+    for j in range(n_suffix):
+        p = params[tvt_idx + 1 + j]
+        if not bindable(p):
+            continue
+        arg_idx = tvt_idx + n_absorbed + j
+        bind_positional(p, args[arg_idx]) if arg_idx < len(args) else bind_unfilled(p)
     return subs
 
 
 def _resolve(
     node: Any,
     target_base: type,
-    parent_subs: dict[TypeVar, Any],
+    parent_subs: dict[Any, Any],
     return_bound_as_fallback: bool,
 ) -> tuple[Any, ...] | None:
     """DFS through ``node``'s inheritance hierarchy looking for ``target_base``.
@@ -173,16 +285,16 @@ def _resolve(
         origin = get_origin_robust(node)
         if origin is None:
             return None
-        args = tuple(
-            _substitute_typevars(a, parent_subs) for a in get_args_robust(node)
-        )
+        args = _subst_args(get_args_robust(node), parent_subs)
+        subscripted = True
     elif isinstance(node, type):
         origin = node
         args = ()
+        subscripted = False
     else:
         return None
 
-    subs = _build_subs(origin, args, return_bound_as_fallback)
+    subs = _build_subs(origin, args, return_bound_as_fallback, subscripted)
 
     if origin is target_base:
         params = get_parameters(target_base)
@@ -192,7 +304,9 @@ def _resolve(
         # In that case fall back to the (already-substituted) args we walked to.
         if not params and args:
             return args
-        return tuple(subs[p] if _is_typevar(p) and p in subs else p for p in params)
+        # ``subs.get(p, p)`` (not gated on ``_is_typevar``) so ``*Ts`` / ``**P``
+        # params resolve to their bound value too.
+        return tuple(subs.get(p, p) for p in params)
 
     for base in get_original_bases(origin):
         base_origin = get_origin_robust(base) if is_generic_alias(base) else base

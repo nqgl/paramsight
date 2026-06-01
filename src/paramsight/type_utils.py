@@ -56,6 +56,29 @@ def _is_typevar(x: Any) -> TypeGuard[TypeVar]:
     return getattr(x, "__class__", type(x)).__name__ == "TypeVar"
 
 
+def _is_typevartuple(x: Any) -> bool:
+    """``*Ts`` -- a PEP 646 ``TypeVarTuple``. Not a ``TypeVar``; binds to a
+    *sequence* of types and appears in containers wrapped in ``Unpack[...]``."""
+    return type(x).__name__ == "TypeVarTuple"
+
+
+def _is_paramspec(x: Any) -> bool:
+    """``**P`` -- a PEP 612 ``ParamSpec``. Not a ``TypeVar``; binds to a parameter
+    list and appears as the first argument of a ``Callable``."""
+    return type(x).__name__ == "ParamSpec"
+
+
+def _is_unpack(x: Any) -> bool:
+    """``*Ts`` / ``Unpack[Ts]`` as it appears inside a container's arguments."""
+    return get_origin(x) is typing.Unpack
+
+
+def _unpack_inner(x: Any) -> Any:
+    """The ``TypeVarTuple`` (or other unpackable) inside an ``Unpack[...]``."""
+    (inner,) = get_args(x)
+    return inner
+
+
 def _get_typevar_default(tv: Any) -> Any:
     return getattr(tv, "__default__", getattr(tv, "default", _NODEFAULT))
 
@@ -132,18 +155,15 @@ def _make_issubclass_guard[T](t: type[T]) -> Callable[[Any], TypeGuard[type[T]]]
 def get_parameters(cls: type | GenericAlias):
     orig = get_origin_robust(cls) or cls
     assert isinstance(orig, type)
-    old_style_params = getattr(orig, "__parameters__", get_args_robust(cls))
-    if len(orig.__type_params__) != len(old_style_params):
-        if not old_style_params:
-            return orig.__type_params__
-        if not orig.__type_params__:
-            return old_style_params
-        raise ValueError(
-            f"""inconsistent number of parameters for {orig.__name__}: 
-            {orig.__type_params__} != {old_style_params}
-            """
-        )
-    return orig.__type_params__
+    # A PEP 695 class carries authoritative ``__type_params__``; trust it. Only an
+    # old-style ``Generic[T]`` class (empty ``__type_params__``) needs the derived
+    # ``__parameters__``. This ordering matters mid-creation: during a descriptor's
+    # ``__set_name__`` a subclass transiently exposes its *base's* inherited
+    # ``__parameters__`` -- a different, often shorter list (acutely so with a
+    # ``TypeVarTuple``) -- so ``__type_params__`` is the only reliable source then.
+    if orig.__type_params__:
+        return orig.__type_params__
+    return getattr(orig, "__parameters__", get_args_robust(cls))
 
 
 def get_num_typevars(cls: type | GenericAlias) -> int:

@@ -56,12 +56,25 @@ def _make_patched_cgi(owner):
 
     _base_cgi = cgi
 
-    @cache
-    def _patched_cgi(cls, key, _base=_base_cgi):
-        assert _base is _base_cgi
+    def _build(cls, key):
         alias = _base_cgi(cls, key)  # a types.GenericAlias
         assert not _is_pydantic(cls)
         return make_alias_instance_from_alias(_GAProxy, alias)  # our thin wrapper
+
+    @cache
+    def _cached(cls, key):
+        return _build(cls, key)
+
+    def _patched_cgi(cls, key, _base=_base_cgi):
+        assert _base is _base_cgi
+        try:
+            hash(key)
+        except TypeError:
+            # ParamSpec subscription -- ``C[[int, str]]`` -- passes an unhashable
+            # list key, so memoizing isn't possible; build a fresh proxy. Equal
+            # aliases still hash/compare equal, so downstream caches aren't harmed.
+            return _build(cls, key)
+        return _cached(cls, key)
 
     return _patched_cgi
 

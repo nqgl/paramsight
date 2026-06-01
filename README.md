@@ -160,6 +160,7 @@ Notes:
       value_type = TypeVarValue[T]()
   ```
 - The type argument must be one of the owning class's own `TypeVar`s; otherwise `TypeVarValue` raises `TypeError` at class-definition time (for PEP 695 classes; for old-style `Generic[T]` classes the same error surfaces at first access).
+- Resolution handles the type-system's parameterized forms: unions (`T | None`), `Callable`, `Annotated`, **`TypeVarTuple`** (`*Ts` flattens — `class Arch[*Ts](Base[tuple[*Ts]])` then `Arch[int, str]` resolves `Base`'s arg to `tuple[int, str]`), and **`ParamSpec`** (`Callable[P, R]`). A genuinely unsupported parameterized form is rejected with a clear `TypeError` rather than silently mis-resolved.
 
 The untyped equivalent is `get_typevar_value(cls, base, typevar)`.
 
