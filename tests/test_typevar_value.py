@@ -4,13 +4,27 @@ Covers runtime resolution and (via ``typing.assert_type``, which is a runtime
 no-op but checked by static type checkers) the narrowed ``type[T]`` surface.
 """
 
-from types import GenericAlias
-from typing import Generic, TypeVar, assert_type
+from collections.abc import Callable
+from types import GenericAlias, NoneType
+from typing import (
+    Annotated,
+    ForwardRef,
+    Generic,
+    TypeVar,
+    assert_type,
+    get_args,
+    get_origin,
+)
 
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from paramsight import TypeVarValue, get_args_at_base, takes_alias
+from paramsight import (
+    TypeVarValue,
+    TypeVarValueOption,
+    get_args_at_base,
+    takes_alias,
+)
 
 # ---------------------------------------------------------------------------
 # Basic
@@ -114,6 +128,293 @@ def test_typevar_default_used_when_unspecialized():
 
 def test_typevar_default_overridden_when_specialized():
     assert Defaulted[str].value_type is str
+
+
+# ---------------------------------------------------------------------------
+# Default coercion -- a default resolves the same as an explicit argument.
+# ``T = None`` is the motivating case: the raw ``__default__`` is the ``None``
+# singleton, but subscription turns ``C[None]`` into ``NoneType``, so the
+# default branch must agree (``None`` -> ``NoneType``), not leak the singleton.
+# ---------------------------------------------------------------------------
+
+
+class DefaultedNone[T = None]:
+    value_type = TypeVarValue[T]()
+
+
+def test_none_default_coerces_to_nonetype():
+    assert DefaultedNone.value_type is NoneType
+
+
+def test_none_default_branch_agrees_with_explicit_none():
+    # The whole point of the coercion: C and C[None] must not disagree.
+    assert DefaultedNone.value_type is DefaultedNone[None].value_type is NoneType
+
+
+class _FwdTarget: ...
+
+
+class DefaultedForwardRef[T = "_FwdTarget"]:
+    value_type = TypeVarValue[T]()
+
+
+def test_forward_ref_default_coerces_like_subscription():
+    # General coercion, not a None special-case: a forward-ref default is stored
+    # as the bare string ``"_FwdTarget"`` but must surface as a ForwardRef, the
+    # same as subscription -- and the two branches must agree.
+    v = DefaultedForwardRef.value_type
+    assert isinstance(v, ForwardRef)
+    assert v.__forward_arg__ == "_FwdTarget"
+    assert v == DefaultedForwardRef["_FwdTarget"].value_type
+
+
+# ---------------------------------------------------------------------------
+# TypeVarValue (surface B): unbound + no default is an *error*, not a value.
+# ---------------------------------------------------------------------------
+
+
+class NoDefault[T]:
+    value_type = TypeVarValue[T]()
+
+
+def test_unbound_no_default_raises():
+    with pytest.raises(LookupError, match="did not resolve to a concrete type"):
+        NoDefault.value_type
+
+
+def test_unbound_no_default_still_resolves_when_specialized():
+    assert NoDefault[int].value_type is int
+
+
+# ---------------------------------------------------------------------------
+# Defaults that *reference another typevar*. PEP 696 lets a default name an
+# earlier type parameter (``class C[T, U = T]``), and Python auto-fills that
+# default into ``__args__`` as the raw, unsubstituted typevar -- ``C[int]`` has
+# args ``(int, T)``. Resolution must carry the ``T -> int`` binding into ``U``,
+# rather than leak the raw typevar (which would also slip past the unresolved
+# guard, since a free TypeVar is neither NoDefault nor a concrete type).
+# ---------------------------------------------------------------------------
+
+
+class SelfRef[T, U = T]:
+    u_type = TypeVarValue[U]()
+    u_opt = TypeVarValueOption[U]()
+
+
+def test_typevar_referencing_default_resolves_through_binding():
+    assert SelfRef[int].u_type is int
+    assert get_args_at_base(SelfRef[int], SelfRef) == (int, int)
+
+
+def test_typevar_referencing_default_unresolved_when_bare():
+    # T is itself free here, so U = T has nothing concrete to become.
+    with pytest.raises(LookupError, match="did not resolve to a concrete type"):
+        SelfRef.u_type
+    assert SelfRef.u_opt is None
+
+
+class NestedSelfRef[T, U = list[T]]:
+    u_type = TypeVarValue[U]()
+    u_opt = TypeVarValueOption[U]()
+
+
+def test_nested_typevar_referencing_default_resolves():
+    assert NestedSelfRef[int].u_type == list[int]
+    assert get_args_at_base(NestedSelfRef[int], NestedSelfRef) == (int, list[int])
+
+
+def test_nested_typevar_referencing_default_unresolved_when_bare():
+    # Bare access leaves a hole: list[<unresolved>]. The unresolved check is
+    # recursive, so this is caught even though the top-level value is a list.
+    with pytest.raises(LookupError, match="did not resolve to a concrete type"):
+        NestedSelfRef.u_type
+    assert NestedSelfRef.u_opt is None
+
+
+# ---------------------------------------------------------------------------
+# A free typevar surviving through a base's generic argument -- the resolved
+# value is a *partial* (``list[<unresolved>]``), which the recursive check must
+# also treat as unresolved rather than hand back.
+# ---------------------------------------------------------------------------
+
+
+class _PartialBase[X]:
+    x_type = TypeVarValue[X]()
+    x_opt = TypeVarValueOption[X]()
+
+
+class _PartialMid[T](_PartialBase[list[T]]): ...
+
+
+def test_partial_resolution_through_base_is_unresolved():
+    assert _PartialMid[int].x_type == list[int]
+    with pytest.raises(LookupError, match="did not resolve to a concrete type"):
+        _PartialMid.x_type
+    assert _PartialMid.x_opt is None
+
+
+# ---------------------------------------------------------------------------
+# Unions. A ``T`` inside ``int | T`` is a ``types.UnionType``, not a generic
+# alias, so it needs its own walk both for substitution and for the unresolved
+# check. (Substituting into a union also can't go via ``__class_getitem__``.)
+# ---------------------------------------------------------------------------
+
+
+class UnionDefault[T, U = int | T]:
+    u_type = TypeVarValue[U]()
+    u_opt = TypeVarValueOption[U]()
+
+
+def test_union_default_referencing_typevar_resolves():
+    assert UnionDefault[str].u_type == int | str
+    assert get_args_at_base(UnionDefault[str], UnionDefault) == (str, int | str)
+
+
+def test_union_default_unresolved_when_bare():
+    with pytest.raises(LookupError, match="did not resolve to a concrete type"):
+        UnionDefault.u_type
+    assert UnionDefault.u_opt is None
+
+
+class _UnionBase[X]:
+    x_type = TypeVarValue[X]()
+
+
+class _UnionMid[T](_UnionBase[int | T]): ...
+
+
+def test_union_argument_through_base_resolves():
+    # Pre-existing resolution gap, independent of defaults: a union arg passed to
+    # a base must carry the binding into the union members.
+    assert _UnionMid[str].x_type == int | str
+
+
+# ---------------------------------------------------------------------------
+# Typing special forms. ``Callable`` nests its parameter list (and base-class
+# resolution yields the ``collections.abc`` spelling, which has no ``copy_with``),
+# while forms like ``Annotated`` have non-class origins. Each is reconstructed,
+# and a free typevar *inside* one must still register as unresolved -- including
+# inside a ``Callable``'s plain-``list`` parameter argument.
+# ---------------------------------------------------------------------------
+
+
+def _is_callable_of(value, params, ret):
+    # Spelling-agnostic: typing.Callable != collections.abc.Callable by ``==``,
+    # so compare structurally.
+    return get_origin(value) is Callable and get_args(value) == (params, ret)
+
+
+class _CallableBase[X]:
+    x_type = TypeVarValue[X]()
+    x_opt = TypeVarValueOption[X]()
+
+
+class _CallableMid[T](_CallableBase[Callable[[T], int]]): ...
+
+
+def test_callable_argument_resolves_through_parameter_list():
+    assert _is_callable_of(_CallableMid[str].x_type, [str], int)
+
+
+def test_callable_with_free_typevar_is_unresolved():
+    with pytest.raises(LookupError, match="did not resolve to a concrete type"):
+        _CallableMid.x_type
+    assert _CallableMid.x_opt is None
+
+
+class _CallableDefault[T, U = Callable[[T], int]]:
+    u_type = TypeVarValue[U]()
+
+
+def test_callable_typevar_default_resolves():
+    assert _is_callable_of(_CallableDefault[str].u_type, [str], int)
+
+
+class _AnnotatedBase[X]:
+    x_type = TypeVarValue[X]()
+
+
+class _AnnotatedMid[T](_AnnotatedBase[Annotated[T, "meta"]]): ...
+
+
+def test_annotated_argument_resolves_and_keeps_metadata():
+    assert _AnnotatedMid[int].x_type == Annotated[int, "meta"]
+
+
+# A PEP 695 generic ``type`` alias has a non-class origin and no ``copy_with``;
+# paramsight has no rule to rebuild it, so it refuses loudly rather than silently
+# leaking the unsubstituted alias. (Defined at module scope -- ``type`` statements
+# aren't allowed inside a function.)
+type _UnsupportedAlias[X] = list[X]
+
+
+class _UnsupportedBase[Y]:
+    y_type = TypeVarValue[Y]()
+
+
+class _UnsupportedMid[T](_UnsupportedBase[_UnsupportedAlias[T]]): ...
+
+
+def test_unsupported_type_form_raises_clearly():
+    with pytest.raises(TypeError, match="no rule to rebuild"):
+        _UnsupportedMid[int].y_type
+
+
+# ---------------------------------------------------------------------------
+# TypeVarValueOption (surface A): unbound + no default yields ``None``, with a
+# statically-visible ``type[T] | None`` surface and the canonical idiom.
+# ---------------------------------------------------------------------------
+
+
+class OptBox[T]:
+    value_type = TypeVarValueOption[T]()
+
+
+def test_option_resolves_when_specialized():
+    assert OptBox[int].value_type is int
+    assert OptBox[str]().value_type is str
+    assert_type(OptBox[int].value_type, type[int] | None)
+
+
+def test_option_yields_none_when_unbound_no_default():
+    assert OptBox.value_type is None
+
+
+class OptDefaultNone[T = None]:
+    value_type = TypeVarValueOption[T]()
+
+
+def test_option_default_none_is_nonetype_not_the_none_sentinel():
+    # The coercion is what makes the ``None`` sentinel unambiguous: a default of
+    # ``None`` resolves to the truthy ``NoneType`` class, never the singleton, so
+    # ``None`` from the descriptor means exactly "unresolved" and nothing else.
+    assert OptDefaultNone.value_type is NoneType
+
+
+class OptChild[U](OptBox[U]): ...
+
+
+def test_option_inheritance():
+    assert OptChild[bool].value_type is bool
+    assert OptChild.value_type is None
+
+
+# ---------------------------------------------------------------------------
+# Bound fallback (engine-level, via get_args_at_base) gets the same coercion:
+# a forward-ref bound is source-form too and must come back as a ForwardRef.
+# ---------------------------------------------------------------------------
+
+
+class _BoundTarget: ...
+
+
+class FwdBounded[T: "_BoundTarget"]: ...
+
+
+def test_bound_fallback_coerces_forward_ref():
+    (bound,) = get_args_at_base(FwdBounded, FwdBounded, return_bound_as_fallback=True)
+    assert isinstance(bound, ForwardRef)
+    assert bound.__forward_arg__ == "_BoundTarget"
 
 
 # ---------------------------------------------------------------------------

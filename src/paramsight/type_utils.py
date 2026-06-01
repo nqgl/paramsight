@@ -60,6 +60,30 @@ def _get_typevar_default(tv: Any) -> Any:
     return getattr(tv, "__default__", getattr(tv, "default", _NODEFAULT))
 
 
+def coerce_to_type_form(value: Any) -> Any:
+    """Coerce a raw value into the type-domain form that subscription produces.
+
+    A typevar's ``__default__`` is stored in *source* form: ``T = None`` keeps
+    the ``None`` singleton and ``T = "Foo"`` keeps the bare string ``"Foo"``.
+    Type *subscription* normalizes those -- ``C[None]`` yields ``NoneType`` and
+    ``C["Foo"]`` yields ``ForwardRef('Foo')`` -- via ``typing._type_convert``.
+    Running a default through the same conversion keeps the default branch
+    (``C``) and the explicit branch (``C[default]``) byte-for-byte identical;
+    notably this is *conversion*, not evaluation, so (like subscription) it
+    leaves nested strings alone and never needs a namespace.
+
+    Falls back to a manual ``None -> NoneType`` if the private ``typing`` helper
+    ever disappears -- that being the one coercion paramsight actually relies on.
+    """
+    convert = getattr(typing, "_type_convert", None)
+    if convert is not None:
+        try:
+            return convert(value)
+        except Exception:
+            pass
+    return type(None) if value is None else value
+
+
 def unwrap_annotated(param: Any) -> type:
     inner = get_origin_robust(param)
     if inner is Annotated:

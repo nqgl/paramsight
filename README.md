@@ -59,7 +59,7 @@ assert get_args_at_base(NestedList[int], NestedList) == (int,)   # (and NestedLi
 - `get_args_at_base` — resolve a base's type parameters from anywhere in the hierarchy (like `typing.get_args`, but for an ancestor base)
 - `@takes_alias` — make classmethods receive the generic alias (`Foo[int]`) instead of the bare class
 - `get_typevar_value` — resolve a single, named typevar of a base by identity
-- `TypeVarValue` — a property-style descriptor that exposes a class's resolved typevar, statically typed `type[T]`
+- `TypeVarValue` — a property-style descriptor that exposes a class's resolved typevar, statically typed `type[T]` (and `TypeVarValueOption`, its `type[T] | None` sibling)
 
 (There's also `GenericBaseModel` — an experimental *application* built on top of the above, not a core primitive. See [its section below](#genericbasemodel-experimental-application).)
 
@@ -145,7 +145,14 @@ Validated[int].ensure("nope")          # AssertionError
 
 Notes:
 - Use it alongside `@takes_alias` methods, or read it directly on aliases. Inside a *plain* `@classmethod`, `cls` is the bare class, so the descriptor would see no specialization — the same constraint `@takes_alias` already has.
-- On a bare, unspecialized generic class with no typevar default, reading the attribute yields `typing.NoDefault` (the unresolved sentinel), consistent with `get_args_at_base`.
+- A typevar **default** resolves the same as an explicit argument. The raw `__default__` is stored in *source* form (`T = None` keeps the `None` singleton, `T = "Fwd"` keeps the bare string), so paramsight normalizes it exactly the way subscription does — `None` → `NoneType`, `"Fwd"` → `ForwardRef('Fwd')`. The upshot is that `Box` and `Box[None]` never disagree:
+  ```python
+  class Box[T = None]:
+      value_type = TypeVarValue[T]()
+
+  assert Box.value_type is Box[None].value_type   # both NoneType
+  ```
+- On a bare, unspecialized generic class with **no** typevar default, the typevar is genuinely unresolved — `TypeVarValue` promises `type[T]`, so it raises `LookupError` rather than hand back a sentinel. If "unresolved" is a state you want to *handle* instead of an error, use [`TypeVarValueOption`](#typevarvalueoption) below. (The low-level `get_args_at_base` / `get_typevar_value` still return `typing.NoDefault` here — the sentinel lives at the reflection layer; the descriptors are the boundary that turns it into a raise or a `None`.)
 - On a pydantic `BaseModel`, register the descriptor so pydantic doesn't treat it as a field:
   ```python
   class MyModel[T](BaseModel):
@@ -155,6 +162,26 @@ Notes:
 - The type argument must be one of the owning class's own `TypeVar`s; otherwise `TypeVarValue` raises `TypeError` at class-definition time (for PEP 695 classes; for old-style `Generic[T]` classes the same error surfaces at first access).
 
 The untyped equivalent is `get_typevar_value(cls, base, typevar)`.
+
+#### `TypeVarValueOption`
+
+Same descriptor, typed `type[T] | None` instead of `type[T]`. Where `TypeVarValue` *raises* on an unbound typevar with no default, `TypeVarValueOption` yields `None`, making "unresolved" a first-class state you check with the canonical optional idiom:
+
+```python
+from paramsight import TypeVarValueOption
+
+class Box[T]:
+    value_type = TypeVarValueOption[T]()
+
+assert Box[int].value_type is int      # the type checker sees: type[int] | None
+assert Box.value_type is None          # T unbound, no default
+
+t = Box[int].value_type
+if t is not None:                      # narrows to type[int]
+    ...
+```
+
+The `None` is unambiguous: because a default of `None` resolves to `NoneType` (a truthy class), the `None` singleton never appears as a resolved value — so `None` from the descriptor means exactly "nothing to resolve." The trade-off is the usual optional tax: every read site sees `type[T] | None` and must narrow, even where the typevar is plainly bound. Reach for `TypeVarValue` unless you genuinely branch on absence.
 
 ### Compatibility
 
@@ -259,7 +286,8 @@ class C[T](Base):
 
 - `get_args_at_base(cls, base, return_bound_as_fallback=False)` — resolved type parameters of `base`, as seen from `cls`, positionally (like `typing.get_args`, but for an ancestor base)
 - `get_typevar_value(cls, base, typevar, return_bound_as_fallback=False)` — resolve one typevar of `base` by identity (untyped; returns `Any`)
-- `TypeVarValue[T]()` — property-style descriptor on a generic class; reading it yields the resolved value of `T`, statically typed `type[T]`
+- `TypeVarValue[T]()` — property-style descriptor on a generic class; reading it yields the resolved value of `T`, statically typed `type[T]`; raises `LookupError` if `T` is unbound with no default
+- `TypeVarValueOption[T]()` — same, but statically typed `type[T] | None` and yields `None` (instead of raising) when `T` is unbound with no default
 
 ### Accessing Generic Information in Classmethods
 
