@@ -9,6 +9,7 @@ from collections.abc import Callable
 from types import GenericAlias, NoneType
 from typing import (
     Annotated,
+    Concatenate,
     ForwardRef,
     Generic,
     TypeVar,
@@ -491,6 +492,43 @@ def test_paramspec_ellipsis():
 
 def test_paramspec_unresolved_when_bare():
     assert _ParamSpecArch.x_opt is None
+
+
+class _ParamSpecTrailing[**P, R](_PBase[Callable[P, R]]): ...
+
+
+def test_paramspec_binding_shorthand_and_list_spellings_agree():
+    # ``C[int, str]`` binds P to the bare ``int`` (PEP 612 shorthand for ``[int]``);
+    # the explicit ``C[[int], str]`` binds the list. Both must normalize the same.
+    # (The shorthand is runtime-valid but pyright rejects it, hence the ignore.)
+    assert _is_callable_of(_ParamSpecTrailing[int, str].x_type, [int], str)  # type: ignore[valid-type]
+    assert _is_callable_of(_ParamSpecTrailing[[int], str].x_type, [int], str)
+
+
+class _ParamSpecListDefault[T, **P = [T]](_PBase[Callable[P, int]]): ...
+
+
+def test_paramspec_autofilled_list_default_substitutes_members():
+    # ``**P = [T]`` auto-fills into __args__ as ``(T,)``; the member must resolve.
+    assert _is_callable_of(_ParamSpecListDefault[str].x_type, [str], int)
+
+
+# ``*Ts`` inside ``Concatenate`` is runtime-valid but pyright rejects it (the
+# typing spec disallows it); we still resolve it correctly rather than leak it.
+class _ConcatVariadic[*Ts, **P](
+    _PBase[Callable[Concatenate[int, *Ts, P], int]]  # type: ignore[valid-type]
+): ...
+
+
+def test_concatenate_with_typevartuple_flattens_prefix_and_expands_tail():
+    # Concatenate prefix flattens *Ts, trailing ParamSpec expands into the list.
+    # (Runtime-valid subscription that pyright doesn't accept, hence the ignore.)
+    resolved = _ConcatVariadic[bool, [float]].x_type  # type: ignore[valid-type]
+    assert _is_callable_of(resolved, [int, bool, float], int)
+
+
+def test_concatenate_with_typevartuple_unresolved_when_bare():
+    assert _ConcatVariadic.x_opt is None
 
 
 # ---------------------------------------------------------------------------

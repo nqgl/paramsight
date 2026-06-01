@@ -85,14 +85,16 @@ def _substitute_typevars(value: Any, subs: dict[Any, Any]) -> Any:
             # ``[p, ...]`` -- substitute each, flattening any ``*Ts`` (PEP 646
             # permits ``Callable[[int, *Ts], R]``).
             new_params = list(_subst_args(tuple(params), subs))
+        elif typing.get_origin(params) is typing.Concatenate:
+            # ``Concatenate[t1, ..., P]`` -- flatten its prefix and expand its tail.
+            new_params = _subst_concatenate(params, subs)
+        elif _is_paramspec(params):
+            # A ParamSpec bound to a parameter list comes back as a tuple, which
+            # Callable wants in ``[p, ...]`` list form; an unbound one stays itself.
+            sub = subs.get(params, params)
+            new_params = list(sub) if isinstance(sub, tuple) else sub
         else:
-            # ``...`` or a ParamSpec. A ParamSpec bound to a parameter list comes
-            # back as a tuple, which Callable wants in ``[p, ...]`` list form.
-            sub = _substitute_typevars(params, subs)
-            if _is_paramspec(params) and isinstance(sub, tuple):
-                new_params = list(sub)
-            else:
-                new_params = sub
+            new_params = _substitute_typevars(params, subs)  # ``...``
         if new_params is _NODEFAULT or new_ret is _NODEFAULT:
             # An unresolved parameter list or return type can't be expressed as a
             # Callable (``Callable[NoDefault, int]`` is invalid), so the whole
@@ -150,6 +152,42 @@ def _subst_args(args: tuple[Any, ...], subs: dict[Any, Any]) -> tuple[Any, ...]:
     return tuple(out)
 
 
+def _normalize_paramspec_arg(arg: Any, subs: dict[Any, Any]) -> Any:
+    """Normalize a ParamSpec binding to a parameter list. The arg can be a
+    tuple/list of types, a bare type (``C[int]`` shorthand for ``[int]``), ``...``,
+    or a forwarded ParamSpec; produce a tuple of substituted types (passing ``...``
+    or a ParamSpec straight through). The Callable branch turns the tuple into the
+    ``[p, ...]`` list form."""
+    if arg is Ellipsis or _is_paramspec(arg):
+        return arg
+    if isinstance(arg, (tuple, list)):
+        return tuple(_substitute_typevars(a, subs) for a in arg)
+    return (_substitute_typevars(arg, subs),)
+
+
+def _subst_concatenate(conc: Any, subs: dict[Any, Any]) -> Any:
+    """Substitute a ``Concatenate[t1, ..., P]`` Callable parameter spec: flatten any
+    ``*Ts`` in the prefix and expand the trailing ParamSpec. If that ParamSpec
+    resolved to a concrete parameter list the whole thing collapses to a flat list;
+    otherwise a Concatenate is rebuilt around the still-symbolic tail."""
+    *prefix, tail = get_args_robust(conc)
+    new_prefix = list(_subst_args(tuple(prefix), subs))
+    if _is_paramspec(tail):
+        tail_sub = subs.get(tail, tail)
+    else:
+        tail_sub = _substitute_typevars(tail, subs)
+    if isinstance(tail_sub, tuple):  # ParamSpec -> a concrete parameter list
+        return new_prefix + list(tail_sub)
+    if tail_sub is Ellipsis:
+        return Ellipsis
+    if _is_paramspec(tail_sub):  # still symbolic -> rebuild a Concatenate
+        return typing.Concatenate[tuple(new_prefix + [tail_sub])]
+    # The tail didn't resolve to a usable parameter list (e.g. an unbound
+    # ParamSpec -> NoDefault); Concatenate's last slot must be a ParamSpec or
+    # ``...``, so the whole spec is unresolved.
+    return _NODEFAULT
+
+
 def _typevartuple_default_members(
     default: Any, subs: dict[Any, Any]
 ) -> tuple[Any, ...] | None:
@@ -198,6 +236,12 @@ def _build_subs(
     params = list(get_parameters(origin))
 
     def bind_positional(p: Any, arg: Any) -> None:
+        # A ParamSpec's arg is a *parameter list*, not an ordinary type form, so it
+        # needs its own normalization (``C[int, ...]`` shorthand -> ``(int,)``;
+        # substitute the members of a ``[T]``-style binding).
+        if _is_paramspec(p):
+            subs[p] = _normalize_paramspec_arg(arg, subs)
+            return
         # Resolve the arg against bindings so far. Usually a no-op, but a PEP 696
         # default Python auto-filled into ``__args__`` arrives as the *raw*
         # typevar -- ``C[int]`` on ``class C[T, U = T]`` yields args ``(int, T)``
