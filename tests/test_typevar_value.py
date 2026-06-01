@@ -556,3 +556,91 @@ def test_ensure_roundtrip():
     # static surface: this assignment is itself a type assertion
     expected: type[int] = Validated[int].expected_type
     assert expected is int
+
+
+# ---------------------------------------------------------------------------
+# ``__init_subclass__`` must keep firing
+#
+# Installing the generic-alias proxy patches the owner's ``__init_subclass__``.
+# Regression: the patched version used to call ``super(owner, cls)`` and so
+# silently ate a user-defined ``__init_subclass__`` on the owner itself.
+# ---------------------------------------------------------------------------
+
+
+def test_user_init_subclass_fires_with_typevar_value():
+    seen: list[tuple[str, object]] = []
+
+    class S[T]:
+        Type = TypeVarValue[T]()
+
+        def __init_subclass__(cls) -> None:
+            # The descriptor must already resolve against the subclass's alias.
+            seen.append((cls.__name__, cls.Type))
+
+    class C(S[int]): ...
+
+    assert seen == [("C", int)]
+
+
+def test_user_init_subclass_fires_with_takes_alias():
+    # The user reported the bug "via takes_alias"; that path installs the same
+    # proxy, so the owner's own ``__init_subclass__`` must still run.
+    seen: list[str] = []
+
+    class S[T]:
+        @takes_alias
+        @classmethod
+        def get_type(cls):
+            return get_args_at_base(cls, S)
+
+        def __init_subclass__(cls) -> None:
+            seen.append(cls.__name__)
+
+    class C(S[int]): ...
+
+    assert seen == ["C"]
+
+
+def test_user_init_subclass_super_chain_preserved():
+    # When the owner *inherits* (rather than defines) __init_subclass__, the
+    # cooperative chain must still reach base hooks via super().
+    order: list[str] = []
+
+    class Base:
+        def __init_subclass__(cls, **kw) -> None:
+            super().__init_subclass__(**kw)
+            order.append(f"Base:{cls.__name__}")
+
+    class S[T](Base):
+        Type = TypeVarValue[T]()
+        # S deliberately defines no __init_subclass__ of its own.
+
+    order.clear()  # drop the entry from S's own creation
+
+    class C(S[int]): ...
+
+    assert order == ["Base:C"]
+
+
+def test_user_init_subclass_own_hook_calls_super():
+    # Owner defines its own hook *and* cooperates with super(); both the user
+    # hook and the inherited base hook must run, in the right order.
+    order: list[str] = []
+
+    class Base:
+        def __init_subclass__(cls, **kw) -> None:
+            super().__init_subclass__(**kw)
+            order.append(f"Base:{cls.__name__}")
+
+    class S[T](Base):
+        Type = TypeVarValue[T]()
+
+        def __init_subclass__(cls, **kw) -> None:
+            super().__init_subclass__(**kw)
+            order.append(f"S:{cls.__name__}")
+
+    order.clear()
+
+    class C(S[int]): ...
+
+    assert order == ["Base:C", "S:C"]

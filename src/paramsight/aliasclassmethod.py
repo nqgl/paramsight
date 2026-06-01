@@ -72,12 +72,27 @@ def _make_patched_init_subclass(owner):
         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
             return None
 
+    # Did ``owner`` define ``__init_subclass__`` in its own body? If so, that
+    # hook is the user's and we must run it for every subclass -- the previous
+    # code called ``super(owner, cls)`` unconditionally and silently ate it.
+    # We invoke the captured original (the user's hook); it propagates up the
+    # chain itself via its own ``super().__init_subclass__()``, just like native
+    # Python. If ``owner`` has no hook of its own there is nothing to run, so we
+    # fall back to ``super(owner, cls)`` to continue the cooperative chain --
+    # which, walking ``cls``'s MRO, reaches siblings (e.g. ``Generic`` /
+    # pydantic's machinery that set ``__parameters__``) that ``owner``'s own MRO
+    # does not include.
+    owner_defines_hook = "__init_subclass__" in vars(owner)
+
     def _patched_init_subclass(cls, *a, **kw):
         # A class_swap synthetic is an implementation detail: don't fire
         # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
         if is_creating_synth():
             return
-        super(owner, cls).__init_subclass__(*a, **kw)
+        if owner_defines_hook:
+            _orig_init_subclass.__get__(None, cls)(*a, **kw)
+        else:
+            super(owner, cls).__init_subclass__(*a, **kw)
         _install_ga_proxy(cls)
         return
 
