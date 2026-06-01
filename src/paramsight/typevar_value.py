@@ -1,11 +1,14 @@
-"""Property-style descriptors exposing the resolved value of a class's typevar.
+"""Property-style descriptors exposing a class's resolved typevars.
 
-Two surfaces share one resolution engine:
+Four surfaces share one resolution engine:
 
 - :class:`TypeVarValue` -- statically ``type[T]``. An unresolved typevar with no
   default is treated as an *error* and raises ``LookupError``.
 - :class:`TypeVarValueOption` -- statically ``type[T] | None``. An unresolved
   typevar with no default is a *value*: the attribute yields ``None``.
+- :class:`TypeVarExpression` / :class:`TypeVarExpressionOption` (*experimental*) --
+  resolve a whole type *expression* over the class's typevars (and ``Self``),
+  not just a single typevar.
 
 Which to reach for: ``TypeVarValue`` when reading the attribute on anything but a
 fully-bound class/specialization is a bug (the common case -- no narrowing tax on
@@ -13,10 +16,16 @@ the happy path). ``TypeVarValueOption`` when "unresolved" is a state you want to
 branch on with the canonical ``if t is None`` idiom.
 """
 
+import typing
 from types import UnionType
 from typing import Any
 
-from paramsight._paramsight import get_args_at_base, get_typevar_value
+from paramsight._paramsight import (
+    _collect_typevars,
+    _substitute_typevars,
+    get_args_at_base,
+    get_typevar_value,
+)
 from paramsight.aliasclassmethod import (
     _install_ga_proxy,
     _raise_slotted_instance_without_storage,
@@ -61,18 +70,16 @@ def _is_unresolved(value: Any) -> bool:
     return False
 
 
-def _raise_unresolved(base: type, name: str, typevar: Any, value: Any) -> None:
-    tv = getattr(typevar, "__name__", typevar)
+def _raise_unresolved(base: type, name: str, label: str, value: Any) -> None:
     b = base.__name__
     raise LookupError(
-        f"paramsight: ``{b}.{name}`` (TypeVarValue[{tv}]) did not resolve to a "
-        f"concrete type -- it resolved to {value!r}, which is still unbound. This "
-        f"happens when {tv} has no specialization and no usable default, or when "
-        f"its default/binding itself references a typevar that never got bound. "
-        f"Reach it through a (fuller) specialization (e.g. ``{b}[int].{name}``), "
-        f"or give the typevar a PEP 696 default. If 'unresolved' is a state you "
-        f"want to handle rather than an error, swap ``TypeVarValue`` for "
-        f"``TypeVarValueOption``, which yields ``None`` here."
+        f"paramsight: ``{b}.{name}`` ({label}) did not resolve to a concrete "
+        f"type -- it resolved to {value!r}, which is still unbound. This happens "
+        f"when a referenced type parameter has no specialization and no usable "
+        f"default. Reach it through a (fuller) specialization (e.g. "
+        f"``{b}[int].{name}``), or give the parameter a PEP 696 default. If "
+        f"'unresolved' is a state you want to handle rather than an error, use the "
+        f"matching ``...Option`` descriptor, which yields ``None`` here."
     )
 
 
@@ -104,13 +111,25 @@ class _TypeVarValueBase:
                 f"with one of {owner.__name__}'s typevars, "
                 f"e.g. `{name} = {kind}[T]()`"
             )
+        self._base = owner
+        self._name = name
         # Resolve against the concrete descriptor class actually in use, so this
-        # works identically for TypeVarValue and TypeVarValueOption.
-        (typevar,) = get_args_at_base(orig, type(self))
-        if not _is_typevar(typevar):
+        # works identically across the TypeVarValue/Option/Expression surfaces.
+        (arg,) = get_args_at_base(orig, type(self))
+        self._bind(arg, owner)
+        # Ensure attribute access via a generic alias (Box[int].value_type)
+        # routes through the proxy that respects ``_acm_takes_alias``.
+        _install_ga_proxy(owner)
+
+    def _bind(self, arg: Any, owner: type) -> None:
+        """Validate and capture the descriptor's type argument. The base
+        ``TypeVarValue`` shape wants a single typevar of ``owner``; the expression
+        descriptors override this for whole type expressions."""
+        kind = type(self).__name__
+        if not _is_typevar(arg):
             raise TypeError(
-                f"{owner.__name__}.{name}: {kind}'s type argument must be "
-                f"a TypeVar, got {typevar!r}"
+                f"{owner.__name__}.{self._name}: {kind}'s type argument must be "
+                f"a TypeVar, got {arg!r}"
             )
         # Best-effort: for PEP 695 generics the typevars are visible already;
         # for old-style ``Generic[T]`` classes ``__parameters__`` isn't set
@@ -118,17 +137,12 @@ class _TypeVarValueBase:
         # result here just means "check later" -- ``get_typevar_value`` will
         # raise at access time if the typevar genuinely isn't the owner's.
         params = list(get_parameters(owner))
-        if params and typevar not in params:
+        if params and arg not in params:
             raise TypeError(
-                f"{owner.__name__}.{name}: {typevar!r} is not a typevar of "
+                f"{owner.__name__}.{self._name}: {arg!r} is not a typevar of "
                 f"{owner.__name__}; its typevars are {params}"
             )
-        self._base = owner
-        self._name = name
-        self._typevar = typevar
-        # Ensure attribute access via a generic alias (Box[int].value_type)
-        # routes through the proxy that respects ``_acm_takes_alias``.
-        _install_ga_proxy(owner)
+        self._typevar = arg
 
     def _resolve_owner(self, instance: object | None, owner: type | None) -> type:
         """Pick the class/alias to resolve through. Raises on a slotted instance
@@ -214,7 +228,8 @@ class TypeVarValue[T](_TypeVarValueBase):
     def __get__(self, instance: object | None, owner: type | None = None, /) -> type[T]:
         value = self._resolve_value(instance, owner)
         if _is_unresolved(value):
-            _raise_unresolved(self._base, self._name, self._typevar, value)
+            tv = getattr(self._typevar, "__name__", self._typevar)
+            _raise_unresolved(self._base, self._name, f"TypeVarValue[{tv}]", value)
         return value
 
 
@@ -251,6 +266,104 @@ class TypeVarValueOption[T](_TypeVarValueBase):
         self, instance: object | None, owner: type | None = None, /
     ) -> type[T] | None:
         value = self._resolve_value(instance, owner)
+        if _is_unresolved(value):
+            return None
+        return value
+
+
+class _TypeVarExpressionBase(_TypeVarValueBase):
+    """Shared engine for the *experimental* expression descriptors.
+
+    Where :class:`TypeVarValue` resolves a single typevar, these resolve a whole
+    type *expression* built from the owning class's typevars (plus ``Self``):
+    every typevar in the expression is resolved as usual and substituted in.
+    """
+
+    _expr: Any
+
+    def _bind(self, arg: Any, owner: type) -> None:
+        # The argument is an arbitrary type expression. Restrict it to the owner's
+        # own type parameters -- those are the only ones we can resolve from the
+        # receiver. (``Self`` is allowed and resolved separately; it isn't a
+        # typevar, so ``_collect_typevars`` ignores it.)
+        kind = type(self).__name__
+        params = list(get_parameters(owner))
+        if params:
+            foreign = [tv for tv in _collect_typevars(arg) if tv not in params]
+            if foreign:
+                raise TypeError(
+                    f"{owner.__name__}.{self._name}: {kind} may reference only "
+                    f"{owner.__name__}'s own type parameters (and ``Self``); got "
+                    f"foreign {foreign!r}. Its parameters are {params}."
+                )
+        self._expr = arg
+
+    def _resolve_expression(self, instance: object | None, owner: type | None) -> Any:
+        cls = self._resolve_owner(instance, owner)
+        # Resolve every one of the owner's typevars from the receiver, then add
+        # ``Self`` -> the receiver itself (kept as the alias it was reached through).
+        subs: dict[Any, Any] = dict(
+            zip(
+                get_parameters(self._base),
+                get_args_at_base(cls, self._base),
+                strict=True,
+            )
+        )
+        subs[typing.Self] = cls
+        return _substitute_typevars(self._expr, subs)
+
+
+class TypeVarExpression[X](_TypeVarExpressionBase):
+    """**Experimental.** Resolve a whole type *expression* over the owning class's
+    typevars, not just a single typevar.
+
+    Put it on a generic class, parameterized with any type expression built from
+    that class's own typevars (and optionally ``Self``)::
+
+        class Box[T]:
+            pair = TypeVarExpression[tuple[T, T]]()
+            maybe = TypeVarExpression[T | None]()
+            holder = TypeVarExpression[T | Self]()
+
+        Box[int].pair       # tuple[int, int]
+        Box[str].maybe      # str | None
+        Box[int].holder     # int | Box[int]   (``Self`` -> the receiver alias)
+
+    Every typevar in the expression is resolved exactly as :class:`TypeVarValue`
+    resolves a single one, then substituted in; ``Self`` resolves to the class or
+    specialization the attribute was reached through (kept as an alias if it was
+    one). The expression may reference **only** the owning class's own type
+    parameters -- otherwise ``TypeVarExpression`` raises ``TypeError`` at class
+    definition time, since foreign typevars can't be resolved from the receiver.
+
+    Like :class:`TypeVarValue`, reading it where some referenced parameter is
+    unbound (and undefaulted) raises ``LookupError``; use
+    :class:`TypeVarExpressionOption` for the ``None``-yielding variant.
+
+    Status: experimental and may change. ``TypeVarValue[T]`` is the
+    ``TypeVarExpression[T]`` special case; if this proves solid it may subsume it.
+    """
+
+    def __get__(self, instance: object | None, owner: type | None = None, /) -> type[X]:
+        value = self._resolve_expression(instance, owner)
+        if _is_unresolved(value):
+            _raise_unresolved(
+                self._base, self._name, f"TypeVarExpression[{self._expr}]", value
+            )
+        return value
+
+
+class TypeVarExpressionOption[X](_TypeVarExpressionBase):
+    """**Experimental.** Like :class:`TypeVarExpression`, but typed ``type[X] | None``
+    and yielding ``None`` (instead of raising) when a referenced parameter is
+    unbound. See :class:`TypeVarExpression`; the ``None`` semantics mirror
+    :class:`TypeVarValueOption`.
+    """
+
+    def __get__(
+        self, instance: object | None, owner: type | None = None, /
+    ) -> type[X] | None:
+        value = self._resolve_expression(instance, owner)
         if _is_unresolved(value):
             return None
         return value

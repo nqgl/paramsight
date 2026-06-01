@@ -60,6 +60,7 @@ assert get_args_at_base(NestedList[int], NestedList) == (int,)   # (and NestedLi
 - `@takes_alias` — make classmethods receive the generic alias (`Foo[int]`) instead of the bare class
 - `get_typevar_value` — resolve a single, named typevar of a base by identity
 - `TypeVarValue` — a property-style descriptor that exposes a class's resolved typevar, statically typed `type[T]` (and `TypeVarValueOption`, its `type[T] | None` sibling)
+- `TypeVarExpression` *(experimental)* — like `TypeVarValue`, but resolves a whole type *expression* over the class's typevars (and `Self`), e.g. `TypeVarExpression[T | Self]`
 
 (There's also `GenericBaseModel` — an experimental *application* built on top of the above, not a core primitive. See [its section below](#genericbasemodel-experimental-application).)
 
@@ -184,6 +185,28 @@ if t is not None:                      # narrows to type[int]
 
 The `None` is unambiguous: because a default of `None` resolves to `NoneType` (a truthy class), the `None` singleton never appears as a resolved value — so `None` from the descriptor means exactly "nothing to resolve." The trade-off is the usual optional tax: every read site sees `type[T] | None` and must narrow, even where the typevar is plainly bound. Reach for `TypeVarValue` unless you genuinely branch on absence.
 
+#### `TypeVarExpression` (experimental)
+
+`TypeVarValue` resolves a *single* typevar. `TypeVarExpression` resolves a whole type *expression* built from the class's typevars (and optionally `Self`): each typevar is resolved exactly as `TypeVarValue` resolves one, then substituted into the expression.
+
+```python
+from typing import Self
+from paramsight import TypeVarExpression
+
+class Box[T]:
+    pair = TypeVarExpression[tuple[T, T]]()
+    maybe = TypeVarExpression[T | None]()
+    holder = TypeVarExpression[T | Self]()
+
+assert Box[int].pair == tuple[int, int]       # the type checker sees type[tuple[int, int]]
+assert Box[str].maybe == str | None
+Box[int].holder                               # int | Box[int]  (Self -> the receiver, kept as an alias)
+```
+
+The expression may reference **only** the owning class's own type parameters (anything else can't be resolved from the receiver), enforced with a `TypeError` at class-definition time. `Self` resolves to the class or specialization the attribute was reached through. Unions, `Callable`, `Annotated`, `TypeVarTuple`, and `ParamSpec` inside the expression all resolve, and the static type comes for free — pyright substitutes the receiver's typevars into the `type[X]` surface. There's a `TypeVarExpressionOption` mirror that yields `None` (instead of raising) when a referenced parameter is unbound.
+
+This is **experimental and may change**; `TypeVarValue[T]` is the `TypeVarExpression[T]` special case.
+
 ### Compatibility
 
 Written/tested for compatibility with:
@@ -289,6 +312,7 @@ class C[T](Base):
 - `get_typevar_value(cls, base, typevar, return_bound_as_fallback=False)` — resolve one typevar of `base` by identity (untyped; returns `Any`)
 - `TypeVarValue[T]()` — property-style descriptor on a generic class; reading it yields the resolved value of `T`, statically typed `type[T]`; raises `LookupError` if `T` is unbound with no default
 - `TypeVarValueOption[T]()` — same, but statically typed `type[T] | None` and yields `None` (instead of raising) when `T` is unbound with no default
+- `TypeVarExpression[<expr>]()` *(experimental)* — resolves a type expression over the owner's typevars (and `Self`), statically typed `type[<expr>]`; restricted to the owner's own typevars; `TypeVarExpressionOption` is the `None`-yielding variant
 
 ### Accessing Generic Information in Classmethods
 

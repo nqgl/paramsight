@@ -47,6 +47,10 @@ def _substitute_typevars(value: Any, subs: dict[Any, Any]) -> Any:
     """
     if value is None:
         return None
+    if value is typing.Self:
+        # ``Self`` resolves to the receiver the descriptor was reached through (a
+        # class or specialization), supplied in ``subs`` by TypeVarExpression.
+        return subs.get(value, value)
     if _is_typevar(value):
         return subs.get(value, value)
     if _is_paramspec(value):
@@ -150,6 +154,26 @@ def _subst_args(args: tuple[Any, ...], subs: dict[Any, Any]) -> tuple[Any, ...]:
                 continue
         out.append(_substitute_typevars(a, subs))
     return tuple(out)
+
+
+def _collect_typevars(value: Any, out: list[Any] | None = None) -> list[Any]:
+    """Every TypeVar / TypeVarTuple / ParamSpec referenced in a type expression,
+    in first-seen order. Used to validate that a ``TypeVarExpression`` references
+    only its owning class's own type parameters."""
+    if out is None:
+        out = []
+    if _is_typevar(value) or _is_typevartuple(value) or _is_paramspec(value):
+        if value not in out:
+            out.append(value)
+    elif _is_unpack(value):
+        _collect_typevars(_unpack_inner(value), out)
+    elif isinstance(value, (tuple, list)):
+        for a in value:
+            _collect_typevars(a, out)
+    elif is_generic_alias(value) or isinstance(value, UnionType):
+        for a in get_args_robust(value):
+            _collect_typevars(a, out)
+    return out
 
 
 def _normalize_paramspec_arg(arg: Any, subs: dict[Any, Any]) -> Any:
