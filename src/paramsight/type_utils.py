@@ -50,22 +50,25 @@ def get_origin_robust(ga: Any) -> type | None:
     return res
 
 
+# These ``isinstance`` checks assume the stdlib typevar classes are canonical.
+# That holds on 3.13 (where ``typing_extensions`` re-exports them), but NOT on
+# earlier interpreters, where ``typing_extensions`` ships distinct backport
+# classes a bare ``isinstance(x, typing.TypeVar)`` would miss. See
+# docs/python-version-support.md before lowering the floor.
 def _is_typevar(x: Any) -> TypeGuard[TypeVar]:
-    if isinstance(x, TypeVar):
-        return True
-    return getattr(x, "__class__", type(x)).__name__ == "TypeVar"
+    return isinstance(x, TypeVar)
 
 
 def _is_typevartuple(x: Any) -> bool:
     """``*Ts`` -- a PEP 646 ``TypeVarTuple``. Not a ``TypeVar``; binds to a
     *sequence* of types and appears in containers wrapped in ``Unpack[...]``."""
-    return type(x).__name__ == "TypeVarTuple"
+    return isinstance(x, typing.TypeVarTuple)
 
 
 def _is_paramspec(x: Any) -> bool:
     """``**P`` -- a PEP 612 ``ParamSpec``. Not a ``TypeVar``; binds to a parameter
     list and appears as the first argument of a ``Callable``."""
-    return type(x).__name__ == "ParamSpec"
+    return isinstance(x, typing.ParamSpec)
 
 
 def _is_unpack(x: Any) -> bool:
