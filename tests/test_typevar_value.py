@@ -4,10 +4,12 @@ Covers runtime resolution and (via ``typing.assert_type``, which is a runtime
 no-op but checked by static type checkers) the narrowed ``type[T]`` surface.
 """
 
+import typing
 from collections.abc import Callable
 from types import GenericAlias, NoneType
 from typing import (
     Annotated,
+    Concatenate,
     ForwardRef,
     Generic,
     TypeVar,
@@ -358,6 +360,175 @@ class _UnsupportedMid[T](_UnsupportedBase[_UnsupportedAlias[T]]): ...
 def test_unsupported_type_form_raises_clearly():
     with pytest.raises(TypeError, match="no rule to rebuild"):
         _UnsupportedMid[int].y_type
+
+
+# ---------------------------------------------------------------------------
+# Variadic parameters. A ``TypeVarTuple`` (``*Ts``) binds to a *sequence* of
+# types and unpacks/flattens in place; a ``ParamSpec`` (``**P``) binds to a
+# parameter list. Both are invisible to ``_is_typevar`` and need their own
+# binding (variadic position) and substitution (unpack flattening / Callable).
+# ---------------------------------------------------------------------------
+
+
+class _VBase[X]:
+    x_type = TypeVarValue[X]()
+    x_opt = TypeVarValueOption[X]()
+
+
+class _Variadic[*Ts](_VBase[tuple[*Ts]]): ...
+
+
+def test_typevartuple_resolves_through_base():
+    assert _Variadic[int, str].x_type == tuple[int, str]
+    assert _Variadic[int].x_type == tuple[int]
+    assert get_args_at_base(_Variadic[int, str], _VBase) == (tuple[int, str],)
+
+
+def test_typevartuple_explicit_empty_vs_bare():
+    # An explicit empty subscription is a real (empty) binding...
+    assert _Variadic[()].x_type == tuple[()]
+    # ...but a bare, unsubscribed class leaves ``*Ts`` unresolved.
+    assert _Variadic.x_opt is None
+    with pytest.raises(LookupError, match="did not resolve to a concrete type"):
+        _Variadic.x_type
+
+
+class _ConcreteVariadic(_Variadic[int, str]): ...
+
+
+def test_typevartuple_concrete_subclass():
+    assert _ConcreteVariadic.x_type == tuple[int, str]
+
+
+class _MiddleVariadic[*Ts](_VBase[tuple[int, *Ts, str]]): ...
+
+
+def test_typevartuple_flattens_in_the_middle():
+    assert _MiddleVariadic[bool, bytes].x_type == tuple[int, bool, bytes, str]
+    # ``*Ts`` empty -> the prefix/suffix remain, nothing inserted.
+    assert _MiddleVariadic[()].x_type == tuple[int, str]
+
+
+class _DefaultedVariadic[*Ts = *tuple[int, str]](_VBase[tuple[*Ts]]): ...
+
+
+def test_typevartuple_fixed_default_expands():
+    # A fixed-length ``*Ts`` default expands like an absorbed arg run.
+    assert _DefaultedVariadic.x_type == tuple[int, str]
+    assert _DefaultedVariadic[bool].x_type == tuple[bool]
+
+
+class _UnboundedDefaultVariadic[*Ts = *tuple[int, ...]](_VBase[tuple[*Ts]]): ...
+
+
+def test_typevartuple_unbounded_default_is_unresolved_not_corrupt():
+    # An unbounded ``*tuple[int, ...]`` default can't expand into a fixed run, so
+    # it reads as unresolved rather than producing a malformed nested unpack.
+    assert _UnboundedDefaultVariadic.x_opt is None
+
+
+class _FwdBase[*Ts]: ...
+
+
+class _FwdChild[*Us](_FwdBase[*Us]): ...
+
+
+def test_bare_typevartuple_forwarding_resolves_to_unresolved_sentinel():
+    # A bare class forwarding its *Us into a base's *Ts is unresolved -- the
+    # absorbed run still holds an un-flattened Unpack, so the binding must be the
+    # NoDefault sentinel, not a concrete one-element tuple ``((Unpack[Us],),)``.
+    assert get_args_at_base(_FwdChild, _FwdBase) == (typing.NoDefault,)
+
+
+class Sentinel: ...  # forward-ref target; paramsight keeps it an unevaluated ref
+
+
+class _SrcFormDefault[*Ts = *tuple[None, "Sentinel"]](_VBase[tuple[*Ts]]): ...
+
+
+def test_typevartuple_fixed_default_members_coerced_like_subscription():
+    # Source-form members in a fixed default must be coerced the same way the
+    # explicit specialization is (None -> NoneType, "Sentinel" -> ForwardRef --
+    # a ref, never evaluated to the Sentinel class).
+    assert _SrcFormDefault.x_type == tuple[NoneType, ForwardRef("Sentinel")]
+    assert _SrcFormDefault.x_type == _SrcFormDefault[None, "Sentinel"].x_type
+
+
+class _TwoBase[A, B]:
+    a_type = TypeVarValue[A]()
+
+
+class _PrefixSuffix[T, *Ts, U](_TwoBase[T, tuple[*Ts]]):
+    u_type = TypeVarValue[U]()
+
+
+def test_typevartuple_absorbs_middle_args_around_ordinary_params():
+    # T=int, Ts=(str, bytes), U=float
+    assert get_args_at_base(_PrefixSuffix[int, str, bytes, float], _TwoBase) == (
+        int,
+        tuple[str, bytes],
+    )
+    assert _PrefixSuffix[int, str, bytes, float].a_type is int
+    assert _PrefixSuffix[int, str, bytes, float].u_type is float
+
+
+class _PBase[X]:
+    x_type = TypeVarValue[X]()
+    x_opt = TypeVarValueOption[X]()
+
+
+class _ParamSpecArch[**P](_PBase[Callable[P, int]]): ...
+
+
+def test_paramspec_resolves_through_base():
+    assert _is_callable_of(_ParamSpecArch[[str, bool]].x_type, [str, bool], int)
+
+
+def test_paramspec_ellipsis():
+    resolved = _ParamSpecArch[...].x_type
+    assert get_origin(resolved) is Callable
+    assert get_args(resolved) == (Ellipsis, int)
+
+
+def test_paramspec_unresolved_when_bare():
+    assert _ParamSpecArch.x_opt is None
+
+
+class _ParamSpecTrailing[**P, R](_PBase[Callable[P, R]]): ...
+
+
+def test_paramspec_binding_shorthand_and_list_spellings_agree():
+    # ``C[int, str]`` binds P to the bare ``int`` (PEP 612 shorthand for ``[int]``);
+    # the explicit ``C[[int], str]`` binds the list. Both must normalize the same.
+    # (The shorthand is runtime-valid but pyright rejects it, hence the ignore.)
+    assert _is_callable_of(_ParamSpecTrailing[int, str].x_type, [int], str)  # type: ignore[valid-type]
+    assert _is_callable_of(_ParamSpecTrailing[[int], str].x_type, [int], str)
+
+
+class _ParamSpecListDefault[T, **P = [T]](_PBase[Callable[P, int]]): ...
+
+
+def test_paramspec_autofilled_list_default_substitutes_members():
+    # ``**P = [T]`` auto-fills into __args__ as ``(T,)``; the member must resolve.
+    assert _is_callable_of(_ParamSpecListDefault[str].x_type, [str], int)
+
+
+# ``*Ts`` inside ``Concatenate`` is runtime-valid but pyright rejects it (the
+# typing spec disallows it); we still resolve it correctly rather than leak it.
+class _ConcatVariadic[*Ts, **P](
+    _PBase[Callable[Concatenate[int, *Ts, P], int]]  # type: ignore[valid-type]
+): ...
+
+
+def test_concatenate_with_typevartuple_flattens_prefix_and_expands_tail():
+    # Concatenate prefix flattens *Ts, trailing ParamSpec expands into the list.
+    # (Runtime-valid subscription that pyright doesn't accept, hence the ignore.)
+    resolved = _ConcatVariadic[bool, [float]].x_type  # type: ignore[valid-type]
+    assert _is_callable_of(resolved, [int, bool, float], int)
+
+
+def test_concatenate_with_typevartuple_unresolved_when_bare():
+    assert _ConcatVariadic.x_opt is None
 
 
 # ---------------------------------------------------------------------------

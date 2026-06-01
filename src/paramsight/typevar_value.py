@@ -28,7 +28,9 @@ from paramsight.slotted_strategies import (
 )
 from paramsight.type_utils import (
     _NODEFAULT,
+    _is_paramspec,
     _is_typevar,
+    _is_typevartuple,
     get_args_robust,
     get_parameters,
     is_generic_alias,
@@ -44,11 +46,13 @@ def _is_unresolved(value: Any) -> bool:
     recursion is the point: a top-level ``is NoDefault`` test would wave a nested
     hole through (e.g. a default ``U = list[T]`` read off a class where ``T``
     itself never got bound). A ``Callable``'s parameter list arrives as a plain
-    ``list``, so that is walked too.
+    ``list``, so that is walked too. A free ``*Ts`` / ``**P`` (TypeVarTuple /
+    ParamSpec, e.g. an ``Unpack[Ts]`` whose ``Ts`` never got bound) counts as
+    unresolved as well.
     """
     if value is _NODEFAULT:
         return True
-    if _is_typevar(value):
+    if _is_typevar(value) or _is_typevartuple(value) or _is_paramspec(value):
         return True
     if isinstance(value, list):  # a Callable's ``[params]`` argument
         return any(_is_unresolved(arg) for arg in value)
