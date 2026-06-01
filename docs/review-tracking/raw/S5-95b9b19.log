@@ -1,0 +1,4434 @@
+OpenAI Codex v0.134.0
+--------
+workdir: /home/g/wt/paramsight/active/review-branch
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e8531-936c-7373-b574-7223024682d7
+--------
+user
+commit 95b9b19: S5: class_swap strategy
+exec
+/usr/bin/zsh -lc 'git status --short && git rev-parse --show-toplevel && git rev-parse 95b9b19''^ && git rev-parse 95b9b19 && git log --oneline --decorate -5' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+?? docs/
+/home/g/wt/paramsight/active/review-branch
+664e721d4737afe03907ab22ba099f48e6cafc74
+95b9b190fb319faf109a7fab91538421811d4b3c
+f77a7ae (HEAD -> wt/paramsight/review-branch, dev) Stop the GA-proxy patch from eating the owner's __init_subclass__
+c3b2653 (origin/dev, wt/paramsight/variadic_substitution) Resolve typevar defaults/values faithfully; add TypeVarValueOption
+416c554 (wt/paramsight/infer_generics, wt/paramsight/ga_handle_main_case) ruff format
+41077a0 gate slotted-instance raise on the class having free typevars
+520d0a7 update gitignore
+
+exec
+/usr/bin/zsh -lc "git show --stat --oneline --decorate --find-renames 95b9b19 && git show --find-renames --name-only --format='' 95b9b19" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+95b9b19 add class_swap strategy + decorator API for slotted generics
+ src/paramsight/__init__.py          |   3 +
+ src/paramsight/_class_swap.py       |  85 +++++++++++++++++++
+ src/paramsight/_orig_class.py       |  38 ++++++++-
+ src/paramsight/aliasclassmethod.py  |   5 ++
+ src/paramsight/ga_proxy.py          |  19 +++--
+ tests/test_attrs_dataclass_slots.py | 157 +++++++++++++++++++++++++++++++++++-
+ 6 files changed, 294 insertions(+), 13 deletions(-)
+src/paramsight/__init__.py
+src/paramsight/_class_swap.py
+src/paramsight/_orig_class.py
+src/paramsight/aliasclassmethod.py
+src/paramsight/ga_proxy.py
+tests/test_attrs_dataclass_slots.py
+
+exec
+/usr/bin/zsh -lc 'git show --find-renames --src-prefix=a/ --dst-prefix=b/ --unified=80 95b9b19' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+commit 95b9b190fb319faf109a7fab91538421811d4b3c
+Author: Glen Taggart <glenmtaggart@gmail.com>
+Date:   Sun May 17 13:54:52 2026 -0700
+
+    add class_swap strategy + decorator API for slotted generics
+    
+    Hand-merged check_edge_case 657dda3 onto dev.
+    
+    class_swap: a third opt-in for slotted classes needing instance-side
+    @takes_alias/TypeVarValue. Child[int](...) swaps the instance's
+    __class__ to a cached, per-parametrization __slots__=() subclass
+    carrying _paramsight_alias. __slots__=() is layout-compatible with the
+    origin, so it works on attrs @define/@frozen / @dataclass(slots=True) /
+    manual __slots__ without a field and without weakref-ability.
+    
+    - _class_swap.py: synthetic-class cache, thread-local creation flag,
+      pickle reconstructor (3-tuple __reduce__ delegating state I/O to the
+      normal machinery; _synth_new is module-level so it's picklable)
+    - _orig_class: "class_swap" added to _VALID_SLOT_STRATEGIES;
+      get_orig_class also checks type(inst)._paramsight_alias; new
+      uses_side_table / uses_class_swap class-decorator sugar (exported)
+    - ga_proxy.__call__: class_swap branch slotted into dev's nit#1 chain
+      (storage -> class_swap -> side_table -> defer)
+    - aliasclassmethod: _patched_init_subclass skips synthetic creation
+      (thread-local guard) so synthetics don't fire user __init_subclass__
+      or re-install the proxy
+    - tests: +10 (class_swap resolution/no-pollution/isinstance-vs-identity/
+      no-bleed/evolve+copy+deepcopy+pickle/dataclass+manual slots/
+      __init_subclass__ suppression/unparametrized fallback; decorator
+      equivalence). Reintegrated onto get_args_at_base.
+    - two scoped pyright ignores in _class_swap (dynamic origin[...]
+      subscript and origin.__new__(origin) -- runtime-correct, unmodelable),
+      consistent with the existing __class_getitem__/UnionType ignores
+    
+    Trade-off (documented): type(inst) is Cls becomes False for class_swap
+    (isinstance stays True; name/qualname preserved). No field pollution;
+    survives evolve/copy/pickle.
+    
+    ruff clean, pyright (src) 0/0/0, pytest 132 passed.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/src/paramsight/__init__.py b/src/paramsight/__init__.py
+index 284398f..a5fe228 100644
+--- a/src/paramsight/__init__.py
++++ b/src/paramsight/__init__.py
+@@ -1,15 +1,18 @@
++from paramsight._orig_class import uses_class_swap, uses_side_table
+ from paramsight._paramsight import (
+     get_args_at_base,
+     get_resolved_typevars_for_base,
+     get_typevar_value,
+ )
+ from paramsight.aliasclassmethod import takes_alias
+ from paramsight.typevar_value import TypeVarValue
+ 
+ __all__ = [
+     "takes_alias",
+     "get_resolved_typevars_for_base",
+     "get_args_at_base",
+     "get_typevar_value",
+     "TypeVarValue",
++    "uses_side_table",
++    "uses_class_swap",
+ ]
+diff --git a/src/paramsight/_class_swap.py b/src/paramsight/_class_swap.py
+new file mode 100644
+index 0000000..6c5c857
+--- /dev/null
++++ b/src/paramsight/_class_swap.py
+@@ -0,0 +1,85 @@
++"""``class_swap`` strategy: carry parametrization via a synthetic subclass.
++
++``Child[int](...)`` produces an instance whose ``__class__`` is swapped to a
++cached, per-parametrization ``__slots__ = ()`` subclass of ``Child`` carrying
++``_paramsight_alias = Child[int]``. Because the synthetic adds no slots, it is
++layout-compatible with the origin, so the swap works on slotted / frozen
++instances. ``isinstance(inst, Child)`` stays ``True``; ``type(inst) is Child``
++becomes ``False`` (the documented trade-off of this strategy).
++
++It survives ``attrs.evolve`` / ``copy`` / ``deepcopy`` (those rebuild via
++``type(inst)``, which is the synthetic) and ``pickle`` (via the ``__reduce__``
++installed on the synthetic, which reconstructs the origin instance and re-swaps
++its ``__class__``; state save/restore is delegated to the normal machinery).
++"""
++
++import threading
++
++# (origin, args) -> synthetic subclass. The alias that keys a parametrization
++# is itself cached for the process's lifetime, so this never frees -- one small
++# type object per distinct parametrization actually instantiated.
++_synth_cache: dict[tuple, type] = {}
++
++# Set while we call ``type(...)`` to build a synthetic, so paramsight's patched
++# ``__init_subclass__`` can skip it (a synthetic is an implementation detail and
++# must not trigger user/base ``__init_subclass__`` hooks or re-install proxies).
++_creating = threading.local()
++
++
++def is_creating_synth() -> bool:
++    return getattr(_creating, "flag", False)
++
++
++def _args_for_getitem(args: tuple):
++    # Mirror ``typing._GenericAlias.__reduce__``: a 1-tuple of a non-tuple
++    # subscripts as a scalar (``Box[int]`` not ``Box[(int,)]``).
++    if len(args) == 1 and not isinstance(args[0], tuple):
++        return args[0]
++    return args
++
++
++def _get_or_make(origin: type, args: tuple) -> type:
++    key = (origin, args)
++    cached = _synth_cache.get(key)
++    if cached is not None:
++        return cached
++    # origin has paramsight's patched __class_getitem__ (-> _GAProxy); the
++    # checker can't model that runtime subscriptability.
++    alias = origin[_args_for_getitem(args)]  # pyright: ignore[reportIndexIssue]
++    ns = {
++        "__slots__": (),
++        "_paramsight_alias": alias,
++        "__module__": getattr(origin, "__module__", None),
++        "__qualname__": getattr(origin, "__qualname__", origin.__name__),
++        "__reduce__": _synth_reduce,
++    }
++    _creating.flag = True
++    try:
++        synth = type(origin)(origin.__name__, (origin,), ns)
++    finally:
++        _creating.flag = False
++    _synth_cache[key] = synth
++    return synth
++
++
++def get_synth(alias) -> type:
++    """The synthetic subclass for ``alias`` (a ``_GAProxy``)."""
++    return _get_or_make(alias.__origin__, alias.__args__)
++
++
++def _synth_new(origin: type, args: tuple):
++    # origin.__new__(origin) is valid for an arbitrary class at runtime;
++    # typeshed's __new__ overloads can't express it.
++    obj = origin.__new__(origin)  # pyright: ignore[reportCallIssue]
++    object.__setattr__(obj, "__class__", _get_or_make(origin, args))
++    return obj
++
++
++def _synth_reduce(self):
++    # 3-tuple ``(callable, args, state)``: pickle calls ``_synth_new`` then
++    # applies ``state`` via the instance's normal ``__setstate__`` (or the
++    # default slotted-state handling) -- so we don't reimplement state I/O.
++    alias = type(self)._paramsight_alias
++    getstate = getattr(self, "__getstate__", None)
++    state = getstate() if getstate is not None else self.__dict__
++    return (_synth_new, (alias.__origin__, alias.__args__), state)
+diff --git a/src/paramsight/_orig_class.py b/src/paramsight/_orig_class.py
+index cfd653f..f3704ab 100644
+--- a/src/paramsight/_orig_class.py
++++ b/src/paramsight/_orig_class.py
+@@ -1,120 +1,154 @@
+ """Slotted-class handling for ``__orig_class__``.
+ 
+ When you call a generic alias (``Box[int](...)``), CPython tries to stamp
+ ``result.__orig_class__ = Box[int]`` on the new instance. That silently fails
+ for instances of slotted classes built by ``attrs.define`` / ``@dataclass``
+ with ``slots=True``: they have no ``__dict__`` and no ``__orig_class__`` slot.
+ 
+ paramsight refuses to silently lose parametrization. The check fires at the
+ point it would actually matter -- an instance-side ``@takes_alias`` /
+ ``TypeVarValue`` lookup that can't recover the alias. (Class-side use --
+ ``Cls[T].method(...)`` -- never needs to recover ``__orig_class__`` from an
+ instance, so a slotted class used purely as a factory is fine with no opt-in.)
+ 
+ When instance-side use is intended, the user provides one of:
+ 
+ - A real field (recommended). Declare ``__orig_class__: type | None = None``
+   in the class body, or use ``attrs.field(...)`` / ``dataclasses.field(...)``
+   to tune ``repr`` / ``eq`` / ``init`` / ``kw_only``. Survives
+   ``attrs.evolve`` / ``copy`` / ``pickle``. ``_GAProxy.__call__`` uses
+   ``object.__setattr__`` to populate it, which bypasses frozen attrs'
+   ``__setattr__``.
+ 
+ - ``_paramsight_slots = "side_table"``. Out-of-band tracking via this module.
+   Keyed by ``id`` with a ``weakref.finalize`` cleanup -- works whenever the
+   instance is weakref-able (attrs ``@define`` / ``@frozen`` by default;
+   ``@dataclass(slots=True)`` needs ``weakref_slot=True``). Does NOT survive
+   ``attrs.evolve`` / ``copy`` / ``pickle``: those produce fresh instances
+   absent from the table. ``_GAProxy.__call__`` raises loudly at construction
+   if the instance can't be tracked at all (not weakref-able), to avoid the
+   silent-untracked trap.
+ """
+ 
+ import weakref
+ from typing import Any
+ 
+ 
+ def _is_effectively_slotted(cls: type) -> bool:
+     """True if instances of ``cls`` have no ``__dict__`` -- i.e. arbitrary
+     attribute assignment fails.
+ 
+     Uses CPython's ``__dictoffset__``: 0 means "no per-instance ``__dict__``."
+     (Walking the MRO looking for missing ``__slots__`` is *not* equivalent --
+     e.g. ``typing.Generic`` declares no ``__slots__`` yet contributes no
+     ``__dict__``, because its ``__dictoffset__`` is 0.)
+     """
+     return getattr(cls, "__dictoffset__", -1) == 0
+ 
+ 
+ def _has_orig_class_storage(cls: type) -> bool:
+     """True if instances of ``cls`` can carry ``__orig_class__``: either via
+     ``__dict__``, a ``__slots__`` entry, or an attrs/dataclass field."""
+     if not _is_effectively_slotted(cls):
+         return True
+     for c in cls.__mro__:
+         slots = c.__dict__.get("__slots__") or ()
+         if isinstance(slots, str):
+             slots = (slots,)
+         if "__orig_class__" in slots:
+             return True
+     attrs_attrs = getattr(cls, "__attrs_attrs__", None)
+     if attrs_attrs and any(a.name == "__orig_class__" for a in attrs_attrs):
+         return True
+     dc_fields = getattr(cls, "__dataclass_fields__", None)
+     if dc_fields and "__orig_class__" in dc_fields:
+         return True
+     return False
+ 
+ 
+-_VALID_SLOT_STRATEGIES = frozenset({"side_table"})
++_VALID_SLOT_STRATEGIES = frozenset({"side_table", "class_swap"})
+ 
+ 
+ def _slot_strategy(owner: type) -> str | None:
+     """The ``_paramsight_slots`` strategy declared on ``owner`` (or its MRO).
+ 
+     Returns one of ``_VALID_SLOT_STRATEGIES`` or ``None``. Raises ``ValueError``
+     for an unrecognised value so typos surface at first lookup.
+     """
+     strategy = getattr(owner, "_paramsight_slots", None)
+     if strategy is None:
+         return None
+     if strategy not in _VALID_SLOT_STRATEGIES:
+         raise ValueError(
+             f"{owner.__name__}._paramsight_slots = {strategy!r}: must be one "
+             f"of {sorted(_VALID_SLOT_STRATEGIES)} or unset."
+         )
+     return strategy
+ 
+ 
++def uses_side_table(cls: type) -> type:
++    """Class decorator: track parametrization of this slotted class's instances
++    out of band (``id``-keyed, weakref-cleaned).
++
++    No field pollution. Does NOT survive ``attrs.evolve`` / ``copy`` /
++    ``pickle``. Requires weakref-able instances (attrs ``@define`` / ``@frozen``
++    by default; ``@dataclass(slots=True)`` needs ``weakref_slot=True``).
++    Equivalent to ``_paramsight_slots = "side_table"`` in the class body.
++    """
++    cls._paramsight_slots = "side_table"  # type: ignore[attr-defined]
++    return cls
++
++
++def uses_class_swap(cls: type) -> type:
++    """Class decorator: track parametrization by swapping each instance's
++    ``__class__`` to a cached per-parametrization synthetic subclass.
++
++    No field pollution; survives ``attrs.evolve`` / ``copy`` / ``pickle``.
++    Trade-off: ``type(inst) is Cls`` becomes ``False`` (``isinstance`` still
++    works). Equivalent to ``_paramsight_slots = "class_swap"`` in the class
++    body.
++    """
++    cls._paramsight_slots = "class_swap"  # type: ignore[attr-defined]
++    return cls
++
++
+ # Out-of-band ``id(instance) -> alias`` table for the "side_table" strategy.
+ # Entries are removed by a ``weakref.finalize`` registered in
+ # ``remember_orig_class`` (see the id-reuse note there). Individual dict ops
+ # (``__setitem__`` from remember, ``pop`` from the finalizer) are atomic under
+ # CPython's GIL and there is no compound read-modify-write, so this is safe in
+ # normal CPython; under free-threading the usual caveats apply (mirrors the
+ # library's existing multithreading note for super-injection).
+ _alias_by_id: dict[int, Any] = {}
+ 
+ 
+ def remember_orig_class(instance: object, alias: Any) -> bool:
+     """Record ``alias`` as the parametrization of ``instance``.
+ 
+     Returns ``True`` on success, ``False`` if the instance can't be tracked
+     (not weakref-able -- without a finalizer we can't know when its ``id`` is
+     free to reuse, so caching could hand a later object the wrong alias).
+     """
+     key = id(instance)
+     try:
+         weakref.finalize(instance, _alias_by_id.pop, key, None)
+     except TypeError:
+         return False
+     _alias_by_id[key] = alias
+     return True
+ 
+ 
+ def get_orig_class(instance: object) -> Any | None:
+-    """``instance.__orig_class__`` if present, else any side-table record."""
++    """The alias ``instance`` was constructed through, by any strategy:
++
++    1. ``__orig_class__`` (native ``__dict__`` storage, or a declared field);
++    2. ``_paramsight_alias`` on the synthetic class (``class_swap``);
++    3. the ``id``-keyed side table (``side_table``).
++    """
+     orig = getattr(instance, "__orig_class__", None)
+     if orig is not None:
+         return orig
++    alias = getattr(type(instance), "_paramsight_alias", None)
++    if alias is not None:
++        return alias
+     return _alias_by_id.get(id(instance))
+diff --git a/src/paramsight/aliasclassmethod.py b/src/paramsight/aliasclassmethod.py
+index 56a09de..413fcf7 100644
+--- a/src/paramsight/aliasclassmethod.py
++++ b/src/paramsight/aliasclassmethod.py
+@@ -1,154 +1,159 @@
+ import inspect
+ import types
+ import typing
+ from collections.abc import Callable
+ from functools import cache, partial
+ from types import GenericAlias
+ from typing import Concatenate, cast, overload
+ 
++from paramsight._class_swap import is_creating_synth
+ from paramsight._orig_class import (
+     _has_orig_class_storage,
+     _slot_strategy,
+     get_orig_class,
+ )
+ from paramsight._ta_ref_attr import _TA_REF_ATTR
+ from paramsight.alias_super import _super
+ from paramsight.ga_proxy import _GAProxy
+ from paramsight.inject_locals import inject_locals
+ from paramsight.type_utils import _is_pydantic
+ 
+ 
+ def _is_specialized_generic(cls):
+     if _is_pydantic(cls):
+         return cls.__pydantic_generic_metadata__["origin"] is not None
+     if isinstance(
+         cls,
+         typing._GenericAlias,  # type:ignore[attr-defined]
+     ) or isinstance(cls, GenericAlias):
+         return True
+     if (
+         hasattr(cls, "__origin__")
+         and hasattr(cls, "__args__")
+         and hasattr(cls, "_inst")
+         and hasattr(cls, "_name")
+     ):
+         return True  #  probably should not happen
+     return False
+ 
+ 
+ def _make_patched_cgi(owner):
+     cgi = inspect.getattr_static(owner, "__class_getitem__", None)
+     if isinstance(cgi, classmethod):
+         cgi = cgi.__func__
+     if cgi is not None and getattr(cgi, "__name__", None) == "_patched_cgi":
+         # Already patched (e.g. ``attrs.define(slots=True)`` rebuilds the class
+         # and re-runs ``__set_name__`` over a namespace that already carries
+         # our patched ``__class_getitem__``); don't wrap it again.
+         return None
+     if cgi is None:
+         bound_cgi = getattr(owner, "__class_getitem__", None)
+         if bound_cgi is None:
+             return None
+         cgi = getattr(bound_cgi, "__func__", None)
+         if cgi is None:
+             cgi = bound_cgi
+ 
+     _base_cgi = cgi
+ 
+     @cache
+     def _patched_cgi(cls, key, _base=_base_cgi):
+         assert _base is _base_cgi
+         alias = _base_cgi(cls, key)  # a types.GenericAlias
+         assert not _is_pydantic(cls)
+         return make_alias_instance_from_alias(_GAProxy, alias)  # our thin wrapper
+ 
+     return _patched_cgi
+ 
+ 
+ def _make_patched_init_subclass(owner):
+     _orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+     if hasattr(_orig_init_subclass, "__func__"):
+         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+             return None
+ 
+     def _patched_init_subclass(cls, *a, **kw):
++        # A class_swap synthetic is an implementation detail: don't fire
++        # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
++        if is_creating_synth():
++            return
+         super(owner, cls).__init_subclass__(*a, **kw)
+         _install_ga_proxy(cls)
+         return
+ 
+     return _patched_init_subclass
+ 
+ 
+ def _raise_slotted_instance_without_storage(method_name, owner):
+     raise TypeError(
+         f"paramsight: ``{owner.__name__}.{method_name}`` was looked up on an "
+         f"instance of {owner.__name__}, which is slotted (attrs / "
+         f"@dataclass(slots=True) / manual __slots__) and has no storage for "
+         f"``__orig_class__``. The instance can't carry its parametrization, so "
+         f"the alias is unrecoverable -- silently falling back to the "
+         f"unparametrized class would yield ``NoDefault`` for the typevars, "
+         f"which is almost certainly a bug. Pick one:\n\n"
+         f"  # 1. Declare a real field (survives attrs.evolve / copy / pickle).\n"
+         f"  #    Use ``attrs.field(...)`` / ``dataclasses.field(...)`` to tune\n"
+         f"  #    repr / eq / init / kw_only.\n"
+         f"  class {owner.__name__}[T](...):\n"
+         f"      __orig_class__: type | None = None\n"
+         f"      ...\n\n"
+         f"  # 2. Out-of-band tracking (no field pollution; does NOT survive\n"
+         f"  #    attrs.evolve / copy / pickle; needs weakref-able instances).\n"
+         f"  class {owner.__name__}[T](...):\n"
+         f"      _paramsight_slots = 'side_table'\n"
+         f"      ...\n\n"
+         f"  # 3. If you only ever call this method class-side\n"
+         f"  #    (e.g. ``{owner.__name__}[int].{method_name}(...)``), neither "
+         f"is\n"
+         f"  #    needed -- this error fires only at instance lookup time."
+     )
+ 
+ 
+ def _install_ga_proxy(owner):
+     if _is_pydantic(owner):
+         return
+     if getattr(owner, "_ga_proxy_installed__", None) == owner:
+         return
+     patched_cgi = _make_patched_cgi(owner)
+     if patched_cgi is not None:
+         owner.__class_getitem__ = classmethod(patched_cgi)
+     patched_init_subclass = _make_patched_init_subclass(owner)
+     if patched_init_subclass is not None:
+         owner.__init_subclass__ = classmethod(patched_init_subclass)
+     owner._ga_proxy_installed__ = owner
+ 
+ 
+ class _TakesAlias[T, **P, R](classmethod):
+     def __init__(self, func: Callable[Concatenate[type[T], P], R]):
+         assert not isinstance(func, classmethod)
+         setattr(func, _TA_REF_ATTR, self)
+         super().__init__(func)
+ 
+     def __set_name__(self, owner, name):
+         self.name = name
+         _install_ga_proxy(owner)
+ 
+     def __get__(self, instance, owner=None) -> Callable[P, R]:
+         if instance is not None:
+             orig = get_orig_class(instance)
+             if orig is not None:
+                 owner = orig
+             else:
+                 cls = type(instance)
+                 # No alias recovered. If the class has storage (slot/field, or
+                 # ``__dict__``) or opted into an explicit strategy, this is a
+                 # legitimate unparametrized-instance call -- fall back to the
+                 # class. Otherwise the instance is slotted-without-storage and
+                 # without opt-in: silently returning ``NoDefault`` for the
+                 # typevars would mask a real bug, so raise.
+                 if (
+                     not _has_orig_class_storage(cls)
+                     and _slot_strategy(cls) is None
+                 ):
+                     _raise_slotted_instance_without_storage(self.name, cls)
+                 if owner is None:
+                     owner = cls
+         return super().__get__(instance, owner)
+ 
+diff --git a/src/paramsight/ga_proxy.py b/src/paramsight/ga_proxy.py
+index f56c582..73160c5 100644
+--- a/src/paramsight/ga_proxy.py
++++ b/src/paramsight/ga_proxy.py
+@@ -1,98 +1,103 @@
+ import inspect
+ import typing
+ from typing import Any
+ 
++from paramsight._class_swap import get_synth
+ from paramsight._is_aliasclassmethod import _is_aliasclassmethod
+ from paramsight._orig_class import (
+     _has_orig_class_storage,
+     _slot_strategy,
+     remember_orig_class,
+ )
+ 
+ _generic_alias_fields = [
+     "_inst",
+     "_name",
+     "__origin__",
+     "__call__",
+     "__mro_entries__",
+     "__getattr__",
+     "__dir__",
+     "__getitem__",
+     "_determine_new_args",
+     "_make_substitution",
+     "copy_with",
+     "__repr__",
+     "__reduce__",
+     "__reduce_ex__",
+     "__mro_entries__",
+     "__iter__",
+     "__args__",
+     "__slots__",
+     "__parameters__",
+ ]
+ 
+ 
+ class _GAProxy(  # type:ignore
+     typing._GenericAlias,  # type:ignore[name-defined]
+     _root=True,  # type:ignore[arg-type]
+ ):
+     def __getattribute__(self, name):
+         if name in _generic_alias_fields:
+             return typing._GenericAlias.__getattribute__(self, name)  # type:ignore[name-defined]
+         origin = self.__origin__
+ 
+         raw = inspect.getattr_static(origin, name)
+         if _is_aliasclassmethod(raw):
+             return raw.__get__(None, self)
+ 
+         return getattr(self.__origin__, name)
+ 
+     def __getattr__(self, name):
+         origin = self.__origin__
+ 
+         raw = inspect.getattr_static(origin, name)
+         if _is_aliasclassmethod(raw):
+             # alias = typing._GenericAlias(
+             #     origin=self.__origin__,
+             #     args=self.__args__,
+             #     inst=self._inst,
+             #     name=self._name,
+             # )
+ 
+             # better to return self than alias because if we return alias,
+             # acm that calls other acm fails on the second call
+             return raw.__get__(None, self)
+         return getattr(origin, name)
+ 
+     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+         result = super().__call__(*args, **kwargs)
+         # ``typing._GenericAlias.__call__`` already tried
+-        # ``result.__orig_class__ = self`` and swallowed any failure. Three
+-        # cases when it didn't stick:
++        # ``result.__orig_class__ = self`` and swallowed any failure. Cases
++        # when it didn't stick:
+         #   1. The class has storage for ``__orig_class__`` (real slot or
+         #      attrs/dataclass field) but ``__setattr__`` rejected the write
+         #      (typical for ``@frozen``). Bypass via ``object.__setattr__``;
+         #      if even that fails, re-raise -- storage was detected, so the
+         #      caller would otherwise silently lose the parametrization.
+-        #   2. ``_paramsight_slots = "side_table"`` is set: record out of
+-        #      band. Raise loudly here if the instance can't be tracked at all
+-        #      (not weakref-able) -- silent untracked-ness is the trap we're
+-        #      preventing.
+-        #   3. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
++        #   2. ``_paramsight_slots = "class_swap"``: swap ``__class__`` to a
++        #      cached synthetic ``__slots__=()`` subclass carrying the alias
++        #      (layout-compatible, so it works on slotted/frozen instances).
++        #   3. ``_paramsight_slots = "side_table"``: record out of band. Raise
++        #      loudly here if the instance can't be tracked at all (not
++        #      weakref-able) -- silent untracked-ness is the trap we prevent.
++        #   4. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
+         #      / ``TypeVarValue.__get__`` will raise *if* the instance is ever
+         #      looked up there. (Class-side use never needs ``__orig_class__``.)
+         if getattr(result, "__orig_class__", None) is not self:
+             cls = type(result)
+             if _has_orig_class_storage(cls):
+                 object.__setattr__(result, "__orig_class__", self)
++            elif _slot_strategy(cls) == "class_swap":
++                object.__setattr__(result, "__class__", get_synth(self))
+             elif _slot_strategy(cls) == "side_table":
+                 if not remember_orig_class(result, self):
+                     raise TypeError(
+                         f"paramsight: cannot record the parametrization of "
+                         f"{self!r}: instances of {cls.__name__} are slotted "
+                         f"and not weakref-able (no ``__weakref__`` slot). "
+                         f"Add ``weakref_slot=True`` to your @dataclass / "
+                         f"@define, or declare ``__orig_class__: type | None "
+                         f"= None`` on the class to use a real field instead."
+                     )
+         return result
+diff --git a/tests/test_attrs_dataclass_slots.py b/tests/test_attrs_dataclass_slots.py
+index 76c2830..1bbcd53 100644
+--- a/tests/test_attrs_dataclass_slots.py
++++ b/tests/test_attrs_dataclass_slots.py
+@@ -1,113 +1,121 @@
+ """Slotted-class handling for ``@takes_alias`` / ``TypeVarValue``.
+ 
+ A slotted class (``attrs.define`` / ``@frozen`` / ``@dataclass(slots=True)`` /
+ manual ``__slots__``) has no ``__dict__``, so CPython's
+ ``result.__orig_class__ = alias`` from the generic alias call silently fails.
+ paramsight refuses to silently drop the parametrization -- but rather than
+ failing at class-creation time (which would punish factory-only patterns that
+ never actually need to recover the alias from an instance), it raises only at
+ the point where the silent failure would matter: when an instance-level
+ ``@takes_alias``/``TypeVarValue`` ``__get__`` couldn't recover the alias
+ and the class has no storage for ``__orig_class__`` and no opt-in.
+ 
+ Users provide one of:
+ 
+ - a real field (``__orig_class__: type | None = None`` declared in the body,
+   or via ``attrs.field``/``dataclasses.field`` to tune semantics) -- survives
+   ``attrs.evolve`` / ``copy`` / ``pickle``;
+-- ``_paramsight_slots = "side_table"`` -- out-of-band tracking (no field
+-  pollution; does NOT survive ``evolve`` / ``copy`` / ``pickle``; needs
+-  weakref-able instances).
++- ``_paramsight_slots = "side_table"`` (or ``@uses_side_table``) -- out-of-band
++  tracking (no field pollution; does NOT survive ``evolve`` / ``copy`` /
++  ``pickle``; needs weakref-able instances);
++- ``_paramsight_slots = "class_swap"`` (or ``@uses_class_swap``) -- per-
++  parametrization synthetic subclass (no field pollution; survives ``evolve``
++  / ``copy`` / ``pickle``; ``type(inst) is Cls`` becomes False).
+ """
+ 
+ import copy
+ import inspect
+ import pickle
+ from dataclasses import dataclass
+ from dataclasses import fields as dc_fields
+ 
+ import attrs
+ import pytest
+ from attrs import define, frozen
+ 
+-from paramsight import get_args_at_base, takes_alias
++from paramsight import (
++    get_args_at_base,
++    takes_alias,
++    uses_class_swap,
++    uses_side_table,
++)
+ 
+ # ---------------------------------------------------------------------------
+ # The deferred raise: instance lookup is the trigger, not class creation.
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def test_slotted_class_with_no_storage_defines_fine_when_only_class_side_use():
+     # Factory-only pattern: never look ``f`` up on an instance, so we don't
+     # need __orig_class__ storage. paramsight must NOT raise at class creation.
+     @define
+     class Factory[T]:
+         @takes_alias
+         @classmethod
+         def make(cls):
+             return get_args_at_base(cls, Factory)
+ 
+     assert Factory[int].make() == (int,)
+ 
+ 
+ def test_attrs_define_instance_lookup_without_storage_raises():
+     @define
+     class A[T]:
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     # Class-side: fine.
+     assert A[int].f() == (int,)
+     # Instance-side: raises with guidance.
+     inst = A[int]()
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         inst.f()
+ 
+ 
+ def test_attrs_frozen_instance_lookup_without_storage_raises():
+     @frozen
+     class A[T]:
+         x: int = 0
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         A[int](x=1).f()
+ 
+ 
+ def test_dataclass_slots_instance_lookup_without_storage_raises():
+     @dataclass(slots=True)
+     class A[T]:
+         x: int = 0
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         A[int](x=1).f()
+ 
+ 
+ def test_manual_slots_instance_lookup_without_storage_raises():
+     class A[T]:
+         __slots__ = ("x",)
+ 
+         def __init__(self, x):
+             self.x = x
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         A[int](x=1).f()
+ 
+ 
+ def test_unrecognised_strategy_raises_value_error_at_first_use():
+@@ -273,82 +281,223 @@ def test_declared_field_with_attrs_field_can_hide_from_repr_and_eq():
+             default=None, repr=False, eq=False
+         )
+         x: int = 0
+ 
+         @takes_alias
+         @classmethod
+         def get_type(cls):
+             return get_args_at_base(cls, A)
+ 
+     # repr: hidden
+     assert "orig_class" not in repr(A[int](x=1))
+     # eq: doesn't differ across parametrizations
+     assert A[int](x=1) == A[str](x=1)
+     # but still works for resolution
+     assert A[int](x=1).get_type() == (int,)
+     assert attrs.evolve(A[int](x=1), x=2).get_type() == (int,)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Inheritance: a child inherits the parent's marker / declared field via MRO.
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def test_attrs_slotted_subclass_inherits_strategy_from_base():
+     @define
+     class Base[T]:
+         _paramsight_slots = "side_table"
+ 
+         @takes_alias
+         @classmethod
+         def base(cls):
+             return get_args_at_base(cls, Base)
+ 
+     @define
+     class Leaf[T](Base[T]):
+         x: int = 0
+ 
+     assert Leaf[int].base() == (int,)
+     assert Leaf[int](x=1).base() == (int,)
+ 
+ 
+ def test_dataclass_subclass_can_add_non_default_field_under_side_table():
+     @dataclass
+     class Parent[T]:
+         _paramsight_slots = "side_table"
+ 
+         @takes_alias
+         @classmethod
+         def base(cls):
+             return get_args_at_base(cls, Parent)
+ 
+     @dataclass
+     class Child[T](Parent[T]):
+         y: int
+ 
+     assert [f.name for f in dc_fields(Child)] == ["y"]
+     assert Child[int](y=5).y == 5
+     assert Child[int](y=5).base() == (int,)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Internal: __class_getitem__ doesn't get wrapped around itself across the
+ # attrs slots-rebuild.
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def test_attrs_slots_rebuild_does_not_double_wrap_class_getitem():
+     cgi = inspect.getattr_static(SideTableBox, "__class_getitem__")
+     if isinstance(cgi, classmethod):
+         cgi = cgi.__func__
+     inner = inspect.unwrap(cgi)
+     assert inner.__name__ == "_patched_cgi"
+     bases = [c.cell_contents for c in (inner.__closure__ or ())]
+     assert not any(
+         getattr(inspect.unwrap(b), "__name__", None) == "_patched_cgi"
+         for b in bases
+         if callable(b)
+     ), "patched __class_getitem__ was wrapped around itself"
+ 
+ 
++# ---------------------------------------------------------------------------
++# Strategy: ``class_swap`` (synthetic per-parametrization subclass)
++# ---------------------------------------------------------------------------
++
++
++@uses_class_swap
++@frozen
++class SwapBox[T]:
++    x: int = 0
++
++    @takes_alias
++    @classmethod
++    def get_type(cls):
++        return get_args_at_base(cls, SwapBox)
++
++
++def test_class_swap_resolves_on_class_and_instance():
++    assert SwapBox[int].get_type() == (int,)
++    assert SwapBox[int](x=1).get_type() == (int,)
++
++
++def test_class_swap_no_field_pollution():
++    assert "__orig_class__" not in {f.name for f in attrs.fields(SwapBox)}
++    assert "orig_class" not in repr(SwapBox[int](x=1))
++    assert "__orig_class__" not in attrs.asdict(SwapBox[int](x=1))
++
++
++def test_class_swap_isinstance_true_but_type_identity_changes():
++    inst = SwapBox[int](x=1)
++    assert isinstance(inst, SwapBox)  # subclass
++    assert type(inst) is not SwapBox  # the documented trade-off
++    assert type(inst).__name__ == "SwapBox"  # repr stays sane
++
++
++def test_class_swap_distinct_parametrizations_dont_bleed():
++    assert SwapBox[int](x=1).get_type() == (int,)
++    assert SwapBox[str](x=2).get_type() == (str,)
++    # same parametrization -> same synthetic class (stable identity)
++    assert type(SwapBox[int](x=1)) is type(SwapBox[int](x=9))
++
++
++def test_class_swap_survives_evolve_copy_deepcopy_pickle():
++    inst = SwapBox[int](x=1)
++    assert attrs.evolve(inst, x=2).get_type() == (int,)
++    assert copy.copy(inst).get_type() == (int,)
++    assert copy.deepcopy(inst).get_type() == (int,)
++    revived = pickle.loads(pickle.dumps(inst))
++    assert revived.get_type() == (int,)
++    assert revived.x == 1
++    assert isinstance(revived, SwapBox)
++
++
++def test_class_swap_on_dataclass_slots_and_manual_slots():
++    @uses_class_swap
++    @dataclass(slots=True)
++    class DC[T]:
++        x: int = 0
++
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return get_args_at_base(cls, DC)
++
++    assert DC[int](x=1).f() == (int,)
++    assert copy.deepcopy(DC[int](x=5)).f() == (int,)
++
++    @uses_class_swap
++    class Manual[T]:
++        __slots__ = ("x",)
++
++        def __init__(self, x=0):
++            self.x = x
++
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return get_args_at_base(cls, Manual)
++
++    assert Manual[int](1).f() == (int,)
++    # (pickle needs a module-level class -- covered by SwapBox above)
++    assert copy.deepcopy(Manual[int](3)).f() == (int,)
++
++
++def test_class_swap_suppresses_init_subclass_for_synthetics():
++    calls = []
++
++    class Hook:
++        def __init_subclass__(cls, **kw):
++            super().__init_subclass__(**kw)
++            calls.append(cls.__name__)
++
++    @uses_class_swap
++    @define
++    class Child[T](Hook):
++        x: int = 0
++
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return get_args_at_base(cls, Child)
++
++    calls.clear()
++    # Building synthetics for these parametrizations must NOT fire Hook's
++    # __init_subclass__ (a synthetic is an implementation detail).
++    Child[int](x=1).f()
++    Child[str](x=2).f()
++    assert calls == []
++
++
++def test_class_swap_unparametrized_instance_falls_back_silently():
++    # ``SwapBox()`` (no [T]) is a legit unparametrized instance: type is the
++    # real class, no synthetic, resolution falls back to the bare class.
++    inst = SwapBox(x=1)
++    assert type(inst) is SwapBox
++    assert inst.get_type() != (int,)
++
++
++# ---------------------------------------------------------------------------
++# Decorators are equivalent to the class-body marker.
++# ---------------------------------------------------------------------------
++
++
++def test_uses_side_table_decorator_equivalent_to_marker():
++    @uses_side_table
++    @define
++    class A[T]:
++        x: int = 0
++
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return get_args_at_base(cls, A)
++
++    assert A._paramsight_slots == "side_table"
++    assert A[int](x=1).f() == (int,)
++
++
++def test_uses_class_swap_decorator_sets_marker():
++    assert SwapBox._paramsight_slots == "class_swap"
++
++
+ if __name__ == "__main__":
+     raise SystemExit(pytest.main([__file__, "-v"]))
+
+exec
+/usr/bin/zsh -lc "find . -maxdepth 3 -type f | sed 's#"'^./##'"' | sort | head -200 && sed -n '1,220p' pyproject.toml" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+.git
+.github/workflows/ci.yml
+.gitignore
+.hypothesis/constants/0660820d27928b4a
+.hypothesis/constants/1886108f6b948daa
+.hypothesis/constants/2dfe647f43e2d31a
+.hypothesis/constants/3de960d666d6a8f9
+.hypothesis/constants/4c560d2c144e23fc
+.hypothesis/constants/57758892c8589d3e
+.hypothesis/constants/67c8036e048e832d
+.hypothesis/constants/84660798c8fcb902
+.hypothesis/constants/8f35e8ab3835ca6a
+.hypothesis/constants/8fdb0282ff3fc8cd
+.hypothesis/constants/a68dabefde365baa
+.hypothesis/constants/afdc2422423a41f4
+.hypothesis/constants/b1bff1ed9ff77663
+.hypothesis/constants/c97e3ae5b64e0368
+.hypothesis/constants/e0e250dda6c6c8dd
+.hypothesis/constants/e7d3ad855fa613f3
+.pytest_cache/.gitignore
+.pytest_cache/CACHEDIR.TAG
+.pytest_cache/README.md
+.ruff_cache/.gitignore
+.ruff_cache/0.15.13/11521367284715839006
+.ruff_cache/0.15.13/15962457301392087198
+.ruff_cache/0.15.13/9513760633435547003
+.ruff_cache/CACHEDIR.TAG
+.venv/.gitignore
+.venv/.lock
+.venv/CACHEDIR.TAG
+.venv/bin/activate
+.venv/bin/activate.bat
+.venv/bin/activate.csh
+.venv/bin/activate.fish
+.venv/bin/activate.nu
+.venv/bin/activate.ps1
+.venv/bin/activate_this.py
+.venv/bin/deactivate.bat
+.venv/bin/pydoc.bat
+.venv/pyvenv.cfg
+LICENSE
+README.md
+docs/review-tracking/README.md
+docs/review-tracking/rejected-suggestions.md
+docs/review-tracking/review-prompt.txt
+docs/review-tracking/validated-issues.md
+pyproject.toml
+src/paramsight/__init__.py
+src/paramsight/_is_aliasclassmethod.py
+src/paramsight/_paramsight.py
+src/paramsight/_ta_ref_attr.py
+src/paramsight/alias_super.py
+src/paramsight/aliasclassmethod.py
+src/paramsight/ga_proxy.py
+src/paramsight/inject_locals.py
+src/paramsight/type_utils.py
+src/paramsight/typevar_value.py
+tests/__pycache__/test_aliasclassmethod_hypothesis.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_attrs_dataclass_slots.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_attrs_with_factory.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_edge_case_2.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_gbm.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_nested_typevar_resolution.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_no_inherit.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_pydantic_with_factory.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_typevar_resolution_hypothesis.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_typevar_resolution_old_generics_hypothesis.cpython-313-pytest-9.0.1.pyc
+tests/__pycache__/test_typevar_value.cpython-313-pytest-9.0.1.pyc
+tests/test_aliasclassmethod_hypothesis.py
+tests/test_attrs_dataclass_slots.py
+tests/test_attrs_with_factory.py
+tests/test_edge_case_2.py
+tests/test_gbm.py
+tests/test_nested_typevar_resolution.py
+tests/test_no_inherit.py
+tests/test_pydantic_with_factory.py
+tests/test_typevar_resolution_hypothesis.py
+tests/test_typevar_resolution_old_generics_hypothesis.py
+tests/test_typevar_value.py
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paramsight"
+version = "0.1.0"
+description = "Runtime type-parameter resolution for Python generics, plus generic-alias access inside classmethods."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+authors = [
+    {name = "Glen Taggart", email = "glenmtaggart@gmail.com"}
+]
+keywords = ["typing", "generics", "typevar", "reflection", "introspection"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "pydantic>=2.12.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.14.3",
+    "pyright>=1.1.400",
+    "hypothesis>=6.0.0",
+    "attrs>=23.2.0",
+]
+# Optional compat target. Heavy; not installed in CI — the torch tests
+# self-skip via pytest.importorskip when it's absent.
+torch = [
+    "torch",
+]
+
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "PT"]
+ignore = ["E741"]
+fixable = ["ALL"]
+unfixable = ["B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures intentionally use non-CapWords class names, helper params like
+# `Base`, bare expressions as type-checker probes, and legacy `Generic[T]` /
+# generic-function syntax (paramsight must work with old-style generics, so the
+# suite deliberately exercises them).
+"tests/**" = ["N801", "N802", "N803", "N806", "B018", "UP046", "UP047"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+# Type-checking is enforced on the shipped package. The test suite deliberately
+# exercises runtime-dynamic / type-invalid scenarios (it's a reflection
+# library) and is validated by pytest, not pyright.
+include = ["src"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/paramsight"]
+
+exec
+/usr/bin/zsh -lc 'git log --oneline --decorate --graph --all --max-count=50 --ancestry-path 95b9b19..HEAD || git log --oneline --decorate --graph --max-count=30' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+* f77a7ae (HEAD -> wt/paramsight/review-branch, dev) Stop the GA-proxy patch from eating the owner's __init_subclass__
+* c3b2653 (origin/dev, wt/paramsight/variadic_substitution) Resolve typevar defaults/values faithfully; add TypeVarValueOption
+* 416c554 (wt/paramsight/infer_generics, wt/paramsight/ga_handle_main_case) ruff format
+* 41077a0 gate slotted-instance raise on the class having free typevars
+* 520d0a7 update gitignore
+* b8f2a6f point the slotted-instance error at the decorator API
+* 6fad258 expose slotted opt-ins under paramsight.slotted_strategies, not top level
+* ea8abb0 move slotted strategies into paramsight.slotted_strategies; add @add_field
+
+exec
+/usr/bin/zsh -lc 'git log --oneline --decorate --graph --max-count=80 --all --date-order' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+* f77a7ae (HEAD -> wt/paramsight/review-branch, dev) Stop the GA-proxy patch from eating the owner's __init_subclass__
+* c3b2653 (origin/dev, wt/paramsight/variadic_substitution) Resolve typevar defaults/values faithfully; add TypeVarValueOption
+* 416c554 (wt/paramsight/infer_generics, wt/paramsight/ga_handle_main_case) ruff format
+* 41077a0 gate slotted-instance raise on the class having free typevars
+| * 33154f6 (wt/paramsight/check_edge_case) gate slotted-instance raise on the class having free typevars
+* | 520d0a7 update gitignore
+* | b8f2a6f point the slotted-instance error at the decorator API
+* | 6fad258 expose slotted opt-ins under paramsight.slotted_strategies, not top level
+* | ea8abb0 move slotted strategies into paramsight.slotted_strategies; add @add_field
+* | 95b9b19 add class_swap strategy + decorator API for slotted generics
+| * 657dda3 Add class_swap strategy + decorator API for slotted generics
+* | 664e721 reintegrate slotted-class __orig_class__ handling (from check_edge_case)
+| | *   8eb7813 (origin/main) Merge pull request #1 from nqgl/dev: rewrite resolution core, add TypeVarValue, polish
+| | |\  
+| |_|/  
+|/| |   
+* | | 319b8fc (wt/paramsight/adding_tests) fix CI: add attrs to dev extra, make torch tests skip when absent
+* | | e3bd98a (wip) polish for release: clean typing, CI, packaging, scrap removal
+* | | 057cf31 update GenericBaseModel validation to use model_validator and fix type resolution for built-in generic types in get_args_at_base
+| * | f5bf784 Don't silently lose generic info on slotted @takes_alias instances
+| * | 5ddf90a Track __orig_class__ out of band for slotted generics
+|/ /  
+* | 1ef3460 .
+* | 7e43538 editing readme
+* | f9b15f9 adds TypeVarValue: typevar runtime-value-containing descriptor that type checks correclty
+* | 7b67de0 adds get_typevar_value. beginning to rename get_resolved_typevars_for_base->get_args_at_base
+* | c14b2d3 draft of runtime typevar class descriptor approach
+* | 63fab37 updated typevar tracing logic, handles edge case with nested type vars
+* | ebcfb29 (wt/paramsight/edge_case_check) edge case
+* | 994b749 wip tweaking typeref
+* | e00e015 GenericBaseModel: - avoid serializing generic type info if there is no generic info - if already specialized, checks that validated types are (covariantly) compatible with preexisting specialization
+* | 7b85032 tests
+* | c80ef62 ruff
+* | 3b82348 add caching by default
+* | f1b1c9b (origin/wip, wt/paramsight/fix-attrs-cx, wt/paramsight/fix-attrs-cd) .
+|/  
+* c33bc1f (main) add GenericBaseModel (wip)
+* 242b098 clarify readme
+* 2096a88 move paramsight.py to _paramsight.py
+* dac030c update to handle old-style generics
+* 7ee83d5 add tests for old-style generics
+* 91fde17 update tests for opt-in super patching
+* 81ca993 update readme to opt-in super patching behavior
+* 0500847 super injection is now off by default unless enabled with patch_super=True
+* 6183ccf edit readme
+* 6b969b0 rename to paramsight
+* a9ed498 add readme
+* 1004f88 gitignore
+* 0b94cd0 rename import
+* 0bbac73 ruff
+* 7fe8117 split type_utils
+* 56713ba improve injection decorator handling
+* 6f924fc added skip_super_injection flag to takes_alias
+* 538100b improved inject_locals decorator signature
+* 64f67ce add basic tests
+* e297f71 working get_resolved_typevars_for_base +takes_alias + updated type nodes to work with pydantic
+* 166f578 ruff
+* 773ef83 wild solution: inject super function refactoring/cleanup comitted to subclassing classmethod
+* 3f2c437 one way to fix the  "non-annotated attribute detected" issue: use TakesAlias as a subclass rather than wrapper of classmethod fixes
+* b94544d wip state of mostly working takes_cache approach (seems good except for pydantic BaseModels where we get complaint that "non-annotated attribute was detected", next to fix)
+* 69026d1 injection updated
+* 76ad2ca inject locals
+* c18c9ce separate takes_alias decorator which wraps classmethods gets type checker to properly recognize the method as a classmethod
+* 92c1e7f clean up aliasclassmethod
+* 1519735 aliasclassmethod currently working on all test cases
+* e6ec71d rename file to aliasclassmethod.py
+* c111f6c fixed failure when generic is subclassed by making _GAProxy an actual _GenericAlias
+* e3359eb aliasclassmethod fiexes (fixed missing __parameters__ when base doesn't define __init_subclass__)
+* b477ce5 getting there! (re: origclassmethod)
+* 64bb353 rearrange
+* 9fc3ea8 pyproject.toml
+* ec941b4 gitignore
+* 7ee9b2e .
+* 3e64ce3 initial commit
+
+exec
+/usr/bin/zsh -lc 'git show --stat --unified=80 f77a7ae && git show --unified=80 f77a7ae -- src/paramsight/aliasclassmethod.py tests/test_attrs_dataclass_slots.py' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+commit f77a7ae2719440026bcf778405c748116ccb2466
+Author: Glen Taggart <glenmtaggart@gmail.com>
+Date:   Mon Jun 1 14:30:35 2026 -0700
+
+    Stop the GA-proxy patch from eating the owner's __init_subclass__
+    
+    Installing the generic-alias proxy (via TypeVarValue's __set_name__ or
+    @takes_alias) patches the owner's __init_subclass__. The patched version
+    called super(owner, cls).__init_subclass__(), which starts the lookup
+    *after* owner in the MRO and so silently skipped an __init_subclass__
+    defined on the owner itself. The captured original was never invoked.
+    
+    Fix: when the owner defines its own __init_subclass__, run that hook (it
+    propagates up via its own super(), like native Python). Only fall back to
+    super(owner, cls) when the owner merely inherits the hook -- there the
+    chain-walk through cls's MRO is what reaches siblings such as Generic /
+    pydantic machinery that set __parameters__, which the owner's own MRO does
+    not include.
+    
+    Add regression tests covering both proxy triggers, the inherited-hook
+    cooperative chain, and an owner hook that cooperates via super().
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+---
+ src/paramsight/aliasclassmethod.py | 17 +++++++-
+ tests/test_typevar_value.py        | 88 ++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 104 insertions(+), 1 deletion(-)
+
+diff --git a/src/paramsight/aliasclassmethod.py b/src/paramsight/aliasclassmethod.py
+index b078b7a..0309778 100644
+--- a/src/paramsight/aliasclassmethod.py
++++ b/src/paramsight/aliasclassmethod.py
+@@ -1,160 +1,175 @@
+ import inspect
+ import types
+ import typing
+ from collections.abc import Callable
+ from functools import cache, partial
+ from types import GenericAlias
+ from typing import Concatenate, cast, overload
+ 
+ from paramsight._ta_ref_attr import _TA_REF_ATTR
+ from paramsight.alias_super import _super
+ from paramsight.ga_proxy import _GAProxy
+ from paramsight.inject_locals import inject_locals
+ from paramsight.slotted_strategies import (
+     _has_orig_class_storage,
+     _slot_strategy,
+     get_orig_class,
+     is_creating_synth,
+ )
+ from paramsight.type_utils import _is_pydantic, get_parameters
+ 
+ 
+ def _is_specialized_generic(cls):
+     if _is_pydantic(cls):
+         return cls.__pydantic_generic_metadata__["origin"] is not None
+     if isinstance(
+         cls,
+         typing._GenericAlias,  # type:ignore[attr-defined]
+     ) or isinstance(cls, GenericAlias):
+         return True
+     if (
+         hasattr(cls, "__origin__")
+         and hasattr(cls, "__args__")
+         and hasattr(cls, "_inst")
+         and hasattr(cls, "_name")
+     ):
+         return True  #  probably should not happen
+     return False
+ 
+ 
+ def _make_patched_cgi(owner):
+     cgi = inspect.getattr_static(owner, "__class_getitem__", None)
+     if isinstance(cgi, classmethod):
+         cgi = cgi.__func__
+     if cgi is not None and getattr(cgi, "__name__", None) == "_patched_cgi":
+         # Already patched (e.g. ``attrs.define(slots=True)`` rebuilds the class
+         # and re-runs ``__set_name__`` over a namespace that already carries
+         # our patched ``__class_getitem__``); don't wrap it again.
+         return None
+     if cgi is None:
+         bound_cgi = getattr(owner, "__class_getitem__", None)
+         if bound_cgi is None:
+             return None
+         cgi = getattr(bound_cgi, "__func__", None)
+         if cgi is None:
+             cgi = bound_cgi
+ 
+     _base_cgi = cgi
+ 
+     @cache
+     def _patched_cgi(cls, key, _base=_base_cgi):
+         assert _base is _base_cgi
+         alias = _base_cgi(cls, key)  # a types.GenericAlias
+         assert not _is_pydantic(cls)
+         return make_alias_instance_from_alias(_GAProxy, alias)  # our thin wrapper
+ 
+     return _patched_cgi
+ 
+ 
+ def _make_patched_init_subclass(owner):
+     _orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+     if hasattr(_orig_init_subclass, "__func__"):
+         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+             return None
+ 
++    # Did ``owner`` define ``__init_subclass__`` in its own body? If so, that
++    # hook is the user's and we must run it for every subclass -- the previous
++    # code called ``super(owner, cls)`` unconditionally and silently ate it.
++    # We invoke the captured original (the user's hook); it propagates up the
++    # chain itself via its own ``super().__init_subclass__()``, just like native
++    # Python. If ``owner`` has no hook of its own there is nothing to run, so we
++    # fall back to ``super(owner, cls)`` to continue the cooperative chain --
++    # which, walking ``cls``'s MRO, reaches siblings (e.g. ``Generic`` /
++    # pydantic's machinery that set ``__parameters__``) that ``owner``'s own MRO
++    # does not include.
++    owner_defines_hook = "__init_subclass__" in vars(owner)
++
+     def _patched_init_subclass(cls, *a, **kw):
+         # A class_swap synthetic is an implementation detail: don't fire
+         # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
+         if is_creating_synth():
+             return
+-        super(owner, cls).__init_subclass__(*a, **kw)
++        if owner_defines_hook:
++            _orig_init_subclass.__get__(None, cls)(*a, **kw)
++        else:
++            super(owner, cls).__init_subclass__(*a, **kw)
+         _install_ga_proxy(cls)
+         return
+ 
+     return _patched_init_subclass
+ 
+ 
+ def _raise_slotted_instance_without_storage(method_name, owner):
+     o = owner.__name__
+     raise TypeError(
+         f"paramsight: ``{o}.{method_name}`` was looked up on an instance of "
+         f"{o}, which is slotted (attrs / @dataclass(slots=True) / manual "
+         f"__slots__) and has no storage for ``__orig_class__``. The instance "
+         f"can't carry its parametrization, so the alias is unrecoverable -- "
+         f"silently falling back to the unparametrized class would yield "
+         f"``NoDefault`` for the typevars, which is almost certainly a bug. "
+         f"Opt in with one of paramsight.slotted_strategies:\n\n"
+         f"  from paramsight.slotted_strategies import (\n"
+         f"      add_field, uses_class_swap, uses_side_table)\n\n"
+         f"  # 1. Real ``__orig_class__`` field; survives "
+         f"attrs.evolve / copy / pickle.\n"
+         f"  #    @add_field must sit *below* @define / @dataclass -- it runs\n"
+         f"  #    first, so the field exists before they scan the body.\n"
+         f"  @define\n"
+         f"  @add_field\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  # 2. Synthetic-subclass swap; no field pollution; survives\n"
+         f"  #    evolve / copy / pickle. Trade-off: ``type(inst) is {o}``\n"
+         f"  #    becomes False (``isinstance`` still works).\n"
+         f"  @uses_class_swap\n"
+         f"  @define\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  # 3. Out-of-band table; no field pollution; does NOT survive\n"
+         f"  #    evolve / copy / pickle; needs weakref-able instances.\n"
+         f"  @uses_side_table\n"
+         f"  @define\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  #    ((2) and (3) are equivalent to ``_paramsight_slots =\n"
+         f'  #    "class_swap" / "side_table"`` set in the class body.)\n\n'
+         f"  # 4. If you only ever call this method class-side (e.g.\n"
+         f"  #    ``{o}[int].{method_name}(...)``), no opt-in is needed --\n"
+         f"  #    this error fires only at instance lookup time."
+     )
+ 
+ 
+ def _install_ga_proxy(owner):
+     if _is_pydantic(owner):
+         return
+     if getattr(owner, "_ga_proxy_installed__", None) == owner:
+         return
+     patched_cgi = _make_patched_cgi(owner)
+     if patched_cgi is not None:
+         owner.__class_getitem__ = classmethod(patched_cgi)
+     patched_init_subclass = _make_patched_init_subclass(owner)
+     if patched_init_subclass is not None:
+         owner.__init_subclass__ = classmethod(patched_init_subclass)
+     owner._ga_proxy_installed__ = owner
+ 
+ 
+ class _TakesAlias[T, **P, R](classmethod):
+     def __init__(self, func: Callable[Concatenate[type[T], P], R]):
+         assert not isinstance(func, classmethod)
+         setattr(func, _TA_REF_ATTR, self)
+         super().__init__(func)
+ 
+     def __set_name__(self, owner, name):
+         self.name = name
+         _install_ga_proxy(owner)
+ 
+     def __get__(self, instance, owner=None) -> Callable[P, R]:
+         if instance is not None:
+             orig = get_orig_class(instance)
+             if orig is not None:
+                 owner = orig
+             else:
+                 cls = type(instance)
+                 # No alias recovered. Raise only if losing the alias actually
+                 # loses information: ``cls`` must still have *free* typevars.
+diff --git a/tests/test_typevar_value.py b/tests/test_typevar_value.py
+index cc00114..9d26265 100644
+--- a/tests/test_typevar_value.py
++++ b/tests/test_typevar_value.py
+@@ -479,80 +479,168 @@ def test_old_style_generic():
+     assert OldStyle[str].value_type is str
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Pydantic models (need the descriptor in ignored_types)
+ # ---------------------------------------------------------------------------
+ 
+ 
+ class PydModel[T](BaseModel):
+     model_config = ConfigDict(ignored_types=(TypeVarValue,))
+     value_type = TypeVarValue[T]()
+ 
+ 
+ def test_pydantic_model():
+     assert PydModel[int].value_type is int
+     assert PydModel[str].value_type is str
+ 
+ 
+ class PydChild[U](PydModel[U]): ...
+ 
+ 
+ def test_pydantic_inheritance():
+     assert PydChild[bool].value_type is bool
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Misuse — should fail loudly, at class-definition time where possible
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def test_misuse_non_typevar_argument_raises_at_class_def():
+     with pytest.raises(TypeError, match="must be a TypeVar"):
+ 
+         class _Bad:
+             x = TypeVarValue[int]()  # type: ignore[valid-type]
+ 
+ 
+ def test_misuse_missing_parameterization_raises_at_class_def():
+     with pytest.raises(TypeError, match="must be parameterized"):
+ 
+         class _Bad:
+             x = TypeVarValue()  # type: ignore[var-annotated]
+ 
+ 
+ def test_misuse_unrelated_typevar_raises_at_class_def():
+     _Unrelated = TypeVar("_Unrelated")
+ 
+     with pytest.raises(TypeError, match="not a typevar of"):
+ 
+         class _Bad[T]:
+             x = TypeVarValue[_Unrelated]()  # type: ignore[valid-type]
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # A worked end-to-end example resembling the original motivation
+ # ---------------------------------------------------------------------------
+ 
+ 
+ class Validated[T]:
+     expected_type = TypeVarValue[T]()
+ 
+     # Note: must be @takes_alias so ``cls`` is the alias (Validated[int]);
+     # a plain @classmethod would receive the bare Validated and the descriptor
+     # would see no specialization. This is the same constraint @takes_alias
+     # methods already have.
+     @takes_alias
+     @classmethod
+     def ensure(cls, val: object) -> T:
+         assert isinstance(val, cls.expected_type)
+         return val  # type: ignore[return-value]
+ 
+ 
+ def test_ensure_roundtrip():
+     assert Validated[int].ensure(3) == 3
+     assert Validated[str].ensure("x") == "x"
+     with pytest.raises(AssertionError):
+         Validated[int].ensure("not an int")
+     # static surface: this assignment is itself a type assertion
+     expected: type[int] = Validated[int].expected_type
+     assert expected is int
++
++
++# ---------------------------------------------------------------------------
++# ``__init_subclass__`` must keep firing
++#
++# Installing the generic-alias proxy patches the owner's ``__init_subclass__``.
++# Regression: the patched version used to call ``super(owner, cls)`` and so
++# silently ate a user-defined ``__init_subclass__`` on the owner itself.
++# ---------------------------------------------------------------------------
++
++
++def test_user_init_subclass_fires_with_typevar_value():
++    seen: list[tuple[str, object]] = []
++
++    class S[T]:
++        Type = TypeVarValue[T]()
++
++        def __init_subclass__(cls) -> None:
++            # The descriptor must already resolve against the subclass's alias.
++            seen.append((cls.__name__, cls.Type))
++
++    class C(S[int]): ...
++
++    assert seen == [("C", int)]
++
++
++def test_user_init_subclass_fires_with_takes_alias():
++    # The user reported the bug "via takes_alias"; that path installs the same
++    # proxy, so the owner's own ``__init_subclass__`` must still run.
++    seen: list[str] = []
++
++    class S[T]:
++        @takes_alias
++        @classmethod
++        def get_type(cls):
++            return get_args_at_base(cls, S)
++
++        def __init_subclass__(cls) -> None:
++            seen.append(cls.__name__)
++
++    class C(S[int]): ...
++
++    assert seen == ["C"]
++
++
++def test_user_init_subclass_super_chain_preserved():
++    # When the owner *inherits* (rather than defines) __init_subclass__, the
++    # cooperative chain must still reach base hooks via super().
++    order: list[str] = []
++
++    class Base:
++        def __init_subclass__(cls, **kw) -> None:
++            super().__init_subclass__(**kw)
++            order.append(f"Base:{cls.__name__}")
++
++    class S[T](Base):
++        Type = TypeVarValue[T]()
++        # S deliberately defines no __init_subclass__ of its own.
++
++    order.clear()  # drop the entry from S's own creation
++
++    class C(S[int]): ...
++
++    assert order == ["Base:C"]
++
++
++def test_user_init_subclass_own_hook_calls_super():
++    # Owner defines its own hook *and* cooperates with super(); both the user
++    # hook and the inherited base hook must run, in the right order.
++    order: list[str] = []
++
++    class Base:
++        def __init_subclass__(cls, **kw) -> None:
++            super().__init_subclass__(**kw)
++            order.append(f"Base:{cls.__name__}")
++
++    class S[T](Base):
++        Type = TypeVarValue[T]()
++
++        def __init_subclass__(cls, **kw) -> None:
++            super().__init_subclass__(**kw)
++            order.append(f"S:{cls.__name__}")
++
++    order.clear()
++
++    class C(S[int]): ...
++
++    assert order == ["Base:C", "S:C"]
+commit f77a7ae2719440026bcf778405c748116ccb2466
+Author: Glen Taggart <glenmtaggart@gmail.com>
+Date:   Mon Jun 1 14:30:35 2026 -0700
+
+    Stop the GA-proxy patch from eating the owner's __init_subclass__
+    
+    Installing the generic-alias proxy (via TypeVarValue's __set_name__ or
+    @takes_alias) patches the owner's __init_subclass__. The patched version
+    called super(owner, cls).__init_subclass__(), which starts the lookup
+    *after* owner in the MRO and so silently skipped an __init_subclass__
+    defined on the owner itself. The captured original was never invoked.
+    
+    Fix: when the owner defines its own __init_subclass__, run that hook (it
+    propagates up via its own super(), like native Python). Only fall back to
+    super(owner, cls) when the owner merely inherits the hook -- there the
+    chain-walk through cls's MRO is what reaches siblings such as Generic /
+    pydantic machinery that set __parameters__, which the owner's own MRO does
+    not include.
+    
+    Add regression tests covering both proxy triggers, the inherited-hook
+    cooperative chain, and an owner hook that cooperates via super().
+    
+    Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+
+diff --git a/src/paramsight/aliasclassmethod.py b/src/paramsight/aliasclassmethod.py
+index b078b7a..0309778 100644
+--- a/src/paramsight/aliasclassmethod.py
++++ b/src/paramsight/aliasclassmethod.py
+@@ -1,160 +1,175 @@
+ import inspect
+ import types
+ import typing
+ from collections.abc import Callable
+ from functools import cache, partial
+ from types import GenericAlias
+ from typing import Concatenate, cast, overload
+ 
+ from paramsight._ta_ref_attr import _TA_REF_ATTR
+ from paramsight.alias_super import _super
+ from paramsight.ga_proxy import _GAProxy
+ from paramsight.inject_locals import inject_locals
+ from paramsight.slotted_strategies import (
+     _has_orig_class_storage,
+     _slot_strategy,
+     get_orig_class,
+     is_creating_synth,
+ )
+ from paramsight.type_utils import _is_pydantic, get_parameters
+ 
+ 
+ def _is_specialized_generic(cls):
+     if _is_pydantic(cls):
+         return cls.__pydantic_generic_metadata__["origin"] is not None
+     if isinstance(
+         cls,
+         typing._GenericAlias,  # type:ignore[attr-defined]
+     ) or isinstance(cls, GenericAlias):
+         return True
+     if (
+         hasattr(cls, "__origin__")
+         and hasattr(cls, "__args__")
+         and hasattr(cls, "_inst")
+         and hasattr(cls, "_name")
+     ):
+         return True  #  probably should not happen
+     return False
+ 
+ 
+ def _make_patched_cgi(owner):
+     cgi = inspect.getattr_static(owner, "__class_getitem__", None)
+     if isinstance(cgi, classmethod):
+         cgi = cgi.__func__
+     if cgi is not None and getattr(cgi, "__name__", None) == "_patched_cgi":
+         # Already patched (e.g. ``attrs.define(slots=True)`` rebuilds the class
+         # and re-runs ``__set_name__`` over a namespace that already carries
+         # our patched ``__class_getitem__``); don't wrap it again.
+         return None
+     if cgi is None:
+         bound_cgi = getattr(owner, "__class_getitem__", None)
+         if bound_cgi is None:
+             return None
+         cgi = getattr(bound_cgi, "__func__", None)
+         if cgi is None:
+             cgi = bound_cgi
+ 
+     _base_cgi = cgi
+ 
+     @cache
+     def _patched_cgi(cls, key, _base=_base_cgi):
+         assert _base is _base_cgi
+         alias = _base_cgi(cls, key)  # a types.GenericAlias
+         assert not _is_pydantic(cls)
+         return make_alias_instance_from_alias(_GAProxy, alias)  # our thin wrapper
+ 
+     return _patched_cgi
+ 
+ 
+ def _make_patched_init_subclass(owner):
+     _orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+     if hasattr(_orig_init_subclass, "__func__"):
+         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+             return None
+ 
++    # Did ``owner`` define ``__init_subclass__`` in its own body? If so, that
++    # hook is the user's and we must run it for every subclass -- the previous
++    # code called ``super(owner, cls)`` unconditionally and silently ate it.
++    # We invoke the captured original (the user's hook); it propagates up the
++    # chain itself via its own ``super().__init_subclass__()``, just like native
++    # Python. If ``owner`` has no hook of its own there is nothing to run, so we
++    # fall back to ``super(owner, cls)`` to continue the cooperative chain --
++    # which, walking ``cls``'s MRO, reaches siblings (e.g. ``Generic`` /
++    # pydantic's machinery that set ``__parameters__``) that ``owner``'s own MRO
++    # does not include.
++    owner_defines_hook = "__init_subclass__" in vars(owner)
++
+     def _patched_init_subclass(cls, *a, **kw):
+         # A class_swap synthetic is an implementation detail: don't fire
+         # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
+         if is_creating_synth():
+             return
+-        super(owner, cls).__init_subclass__(*a, **kw)
++        if owner_defines_hook:
++            _orig_init_subclass.__get__(None, cls)(*a, **kw)
++        else:
++            super(owner, cls).__init_subclass__(*a, **kw)
+         _install_ga_proxy(cls)
+         return
+ 
+     return _patched_init_subclass
+ 
+ 
+ def _raise_slotted_instance_without_storage(method_name, owner):
+     o = owner.__name__
+     raise TypeError(
+         f"paramsight: ``{o}.{method_name}`` was looked up on an instance of "
+         f"{o}, which is slotted (attrs / @dataclass(slots=True) / manual "
+         f"__slots__) and has no storage for ``__orig_class__``. The instance "
+         f"can't carry its parametrization, so the alias is unrecoverable -- "
+         f"silently falling back to the unparametrized class would yield "
+         f"``NoDefault`` for the typevars, which is almost certainly a bug. "
+         f"Opt in with one of paramsight.slotted_strategies:\n\n"
+         f"  from paramsight.slotted_strategies import (\n"
+         f"      add_field, uses_class_swap, uses_side_table)\n\n"
+         f"  # 1. Real ``__orig_class__`` field; survives "
+         f"attrs.evolve / copy / pickle.\n"
+         f"  #    @add_field must sit *below* @define / @dataclass -- it runs\n"
+         f"  #    first, so the field exists before they scan the body.\n"
+         f"  @define\n"
+         f"  @add_field\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  # 2. Synthetic-subclass swap; no field pollution; survives\n"
+         f"  #    evolve / copy / pickle. Trade-off: ``type(inst) is {o}``\n"
+         f"  #    becomes False (``isinstance`` still works).\n"
+         f"  @uses_class_swap\n"
+         f"  @define\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  # 3. Out-of-band table; no field pollution; does NOT survive\n"
+         f"  #    evolve / copy / pickle; needs weakref-able instances.\n"
+         f"  @uses_side_table\n"
+         f"  @define\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  #    ((2) and (3) are equivalent to ``_paramsight_slots =\n"
+         f'  #    "class_swap" / "side_table"`` set in the class body.)\n\n'
+         f"  # 4. If you only ever call this method class-side (e.g.\n"
+         f"  #    ``{o}[int].{method_name}(...)``), no opt-in is needed --\n"
+         f"  #    this error fires only at instance lookup time."
+     )
+ 
+ 
+ def _install_ga_proxy(owner):
+     if _is_pydantic(owner):
+         return
+     if getattr(owner, "_ga_proxy_installed__", None) == owner:
+         return
+     patched_cgi = _make_patched_cgi(owner)
+     if patched_cgi is not None:
+         owner.__class_getitem__ = classmethod(patched_cgi)
+     patched_init_subclass = _make_patched_init_subclass(owner)
+     if patched_init_subclass is not None:
+         owner.__init_subclass__ = classmethod(patched_init_subclass)
+     owner._ga_proxy_installed__ = owner
+ 
+ 
+ class _TakesAlias[T, **P, R](classmethod):
+     def __init__(self, func: Callable[Concatenate[type[T], P], R]):
+         assert not isinstance(func, classmethod)
+         setattr(func, _TA_REF_ATTR, self)
+         super().__init__(func)
+ 
+     def __set_name__(self, owner, name):
+         self.name = name
+         _install_ga_proxy(owner)
+ 
+     def __get__(self, instance, owner=None) -> Callable[P, R]:
+         if instance is not None:
+             orig = get_orig_class(instance)
+             if orig is not None:
+                 owner = orig
+             else:
+                 cls = type(instance)
+                 # No alias recovered. Raise only if losing the alias actually
+                 # loses information: ``cls`` must still have *free* typevars.
+
+exec
+/usr/bin/zsh -lc "git show --unified=40 664e721:src/paramsight/aliasclassmethod.py | sed -n '1,110p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+import inspect
+import types
+import typing
+from collections.abc import Callable
+from functools import cache, partial
+from types import GenericAlias
+from typing import Concatenate, cast, overload
+
+from paramsight._orig_class import (
+    _has_orig_class_storage,
+    _slot_strategy,
+    get_orig_class,
+)
+from paramsight._ta_ref_attr import _TA_REF_ATTR
+from paramsight.alias_super import _super
+from paramsight.ga_proxy import _GAProxy
+from paramsight.inject_locals import inject_locals
+from paramsight.type_utils import _is_pydantic
+
+
+def _is_specialized_generic(cls):
+    if _is_pydantic(cls):
+        return cls.__pydantic_generic_metadata__["origin"] is not None
+    if isinstance(
+        cls,
+        typing._GenericAlias,  # type:ignore[attr-defined]
+    ) or isinstance(cls, GenericAlias):
+        return True
+    if (
+        hasattr(cls, "__origin__")
+        and hasattr(cls, "__args__")
+        and hasattr(cls, "_inst")
+        and hasattr(cls, "_name")
+    ):
+        return True  #  probably should not happen
+    return False
+
+
+def _make_patched_cgi(owner):
+    cgi = inspect.getattr_static(owner, "__class_getitem__", None)
+    if isinstance(cgi, classmethod):
+        cgi = cgi.__func__
+    if cgi is not None and getattr(cgi, "__name__", None) == "_patched_cgi":
+        # Already patched (e.g. ``attrs.define(slots=True)`` rebuilds the class
+        # and re-runs ``__set_name__`` over a namespace that already carries
+        # our patched ``__class_getitem__``); don't wrap it again.
+        return None
+    if cgi is None:
+        bound_cgi = getattr(owner, "__class_getitem__", None)
+        if bound_cgi is None:
+            return None
+        cgi = getattr(bound_cgi, "__func__", None)
+        if cgi is None:
+            cgi = bound_cgi
+
+    _base_cgi = cgi
+
+    @cache
+    def _patched_cgi(cls, key, _base=_base_cgi):
+        assert _base is _base_cgi
+        alias = _base_cgi(cls, key)  # a types.GenericAlias
+        assert not _is_pydantic(cls)
+        return make_alias_instance_from_alias(_GAProxy, alias)  # our thin wrapper
+
+    return _patched_cgi
+
+
+def _make_patched_init_subclass(owner):
+    _orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+    if hasattr(_orig_init_subclass, "__func__"):
+        if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+            return None
+
+    def _patched_init_subclass(cls, *a, **kw):
+        super(owner, cls).__init_subclass__(*a, **kw)
+        _install_ga_proxy(cls)
+        return
+
+    return _patched_init_subclass
+
+
+def _raise_slotted_instance_without_storage(method_name, owner):
+    raise TypeError(
+        f"paramsight: ``{owner.__name__}.{method_name}`` was looked up on an "
+        f"instance of {owner.__name__}, which is slotted (attrs / "
+        f"@dataclass(slots=True) / manual __slots__) and has no storage for "
+        f"``__orig_class__``. The instance can't carry its parametrization, so "
+        f"the alias is unrecoverable -- silently falling back to the "
+        f"unparametrized class would yield ``NoDefault`` for the typevars, "
+        f"which is almost certainly a bug. Pick one:\n\n"
+        f"  # 1. Declare a real field (survives attrs.evolve / copy / pickle).\n"
+        f"  #    Use ``attrs.field(...)`` / ``dataclasses.field(...)`` to tune\n"
+        f"  #    repr / eq / init / kw_only.\n"
+        f"  class {owner.__name__}[T](...):\n"
+        f"      __orig_class__: type | None = None\n"
+        f"      ...\n\n"
+        f"  # 2. Out-of-band tracking (no field pollution; does NOT survive\n"
+        f"  #    attrs.evolve / copy / pickle; needs weakref-able instances).\n"
+        f"  class {owner.__name__}[T](...):\n"
+        f"      _paramsight_slots = 'side_table'\n"
+        f"      ...\n\n"
+        f"  # 3. If you only ever call this method class-side\n"
+        f"  #    (e.g. ``{owner.__name__}[int].{method_name}(...)``), neither "
+        f"is\n"
+        f"  #    needed -- this error fires only at instance lookup time."
+    )
+
+
+def _install_ga_proxy(owner):
+    if _is_pydantic(owner):
+
+exec
+/usr/bin/zsh -lc "git show --stat --oneline ea8abb0 6fad258 b8f2a6f 41077a0 | sed -n '1,240p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+ea8abb0 move slotted strategies into paramsight.slotted_strategies; add @add_field
+ src/paramsight/__init__.py                         |   7 +-
+ src/paramsight/_orig_class.py                      | 154 ---------------------
+ src/paramsight/aliasclassmethod.py                 |  12 +-
+ src/paramsight/ga_proxy.py                         |   4 +-
+ src/paramsight/slotted_strategies/__init__.py      | 147 ++++++++++++++++++++
+ .../class_swap.py}                                 |  13 ++
+ src/paramsight/slotted_strategies/side_table.py    |  53 +++++++
+ src/paramsight/typevar_value.py                    |  10 +-
+ tests/test_attrs_dataclass_slots.py                |  61 ++++++++
+ 9 files changed, 293 insertions(+), 168 deletions(-)
+6fad258 expose slotted opt-ins under paramsight.slotted_strategies, not top level
+ src/paramsight/__init__.py          | 13 +++++--------
+ tests/test_attrs_dataclass_slots.py |  5 ++---
+ 2 files changed, 7 insertions(+), 11 deletions(-)
+b8f2a6f point the slotted-instance error at the decorator API
+ src/paramsight/aliasclassmethod.py | 54 ++++++++++++++++++++++++--------------
+ 1 file changed, 34 insertions(+), 20 deletions(-)
+41077a0 gate slotted-instance raise on the class having free typevars
+ src/paramsight/aliasclassmethod.py  |  20 ++++---
+ src/paramsight/typevar_value.py     |  13 +++--
+ tests/test_attrs_dataclass_slots.py | 102 +++++++++++++++++++++++++++++++++++-
+ 3 files changed, 121 insertions(+), 14 deletions(-)
+
+exec
+/usr/bin/zsh -lc 'git show --unified=80 41077a0 -- src/paramsight/aliasclassmethod.py src/paramsight/typevar_value.py tests/test_attrs_dataclass_slots.py' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+commit 41077a004ca3435446204fe969448b4de2890aee
+Author: Glen Taggart <glenmtaggart@gmail.com>
+Date:   Fri May 22 13:21:23 2026 -0700
+
+    gate slotted-instance raise on the class having free typevars
+    
+    The instance-side raise for slotted classes without __orig_class__
+    storage fired whenever no alias could be recovered. That conflated two
+    cases: a genuine bug (a generic factory's alias was dropped) and a
+    harmless one (the class has no parametrization to lose).
+    
+    It broke two legitimate patterns:
+      - a non-generic slotted class using @takes_alias instance-side;
+      - a concrete slotted subclass, Concrete(Base[int]), where the base's
+        typevars are already bound in the MRO.
+    
+    Both resolve fine straight from type(instance). Gate the raise on
+    get_parameters(cls) being non-empty: raise only when the class still
+    has free typevars, so dropping the instance alias can actually lose
+    information. A subclass that adds its own free typevar, Sub[U](Base[int]),
+    still raises -- Sub[str]() really did carry U=str.
+    
+    Apply the same gate to TypeVarValue.__get__.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/src/paramsight/aliasclassmethod.py b/src/paramsight/aliasclassmethod.py
+index 319be85..c4c6ca8 100644
+--- a/src/paramsight/aliasclassmethod.py
++++ b/src/paramsight/aliasclassmethod.py
+@@ -1,223 +1,227 @@
+ import inspect
+ import types
+ import typing
+ from collections.abc import Callable
+ from functools import cache, partial
+ from types import GenericAlias
+ from typing import Concatenate, cast, overload
+ 
+ from paramsight._ta_ref_attr import _TA_REF_ATTR
+ from paramsight.alias_super import _super
+ from paramsight.ga_proxy import _GAProxy
+ from paramsight.inject_locals import inject_locals
+ from paramsight.slotted_strategies import (
+     _has_orig_class_storage,
+     _slot_strategy,
+     get_orig_class,
+     is_creating_synth,
+ )
+-from paramsight.type_utils import _is_pydantic
++from paramsight.type_utils import _is_pydantic, get_parameters
+ 
+ 
+ def _is_specialized_generic(cls):
+     if _is_pydantic(cls):
+         return cls.__pydantic_generic_metadata__["origin"] is not None
+     if isinstance(
+         cls,
+         typing._GenericAlias,  # type:ignore[attr-defined]
+     ) or isinstance(cls, GenericAlias):
+         return True
+     if (
+         hasattr(cls, "__origin__")
+         and hasattr(cls, "__args__")
+         and hasattr(cls, "_inst")
+         and hasattr(cls, "_name")
+     ):
+         return True  #  probably should not happen
+     return False
+ 
+ 
+ def _make_patched_cgi(owner):
+     cgi = inspect.getattr_static(owner, "__class_getitem__", None)
+     if isinstance(cgi, classmethod):
+         cgi = cgi.__func__
+     if cgi is not None and getattr(cgi, "__name__", None) == "_patched_cgi":
+         # Already patched (e.g. ``attrs.define(slots=True)`` rebuilds the class
+         # and re-runs ``__set_name__`` over a namespace that already carries
+         # our patched ``__class_getitem__``); don't wrap it again.
+         return None
+     if cgi is None:
+         bound_cgi = getattr(owner, "__class_getitem__", None)
+         if bound_cgi is None:
+             return None
+         cgi = getattr(bound_cgi, "__func__", None)
+         if cgi is None:
+             cgi = bound_cgi
+ 
+     _base_cgi = cgi
+ 
+     @cache
+     def _patched_cgi(cls, key, _base=_base_cgi):
+         assert _base is _base_cgi
+         alias = _base_cgi(cls, key)  # a types.GenericAlias
+         assert not _is_pydantic(cls)
+         return make_alias_instance_from_alias(_GAProxy, alias)  # our thin wrapper
+ 
+     return _patched_cgi
+ 
+ 
+ def _make_patched_init_subclass(owner):
+     _orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+     if hasattr(_orig_init_subclass, "__func__"):
+         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+             return None
+ 
+     def _patched_init_subclass(cls, *a, **kw):
+         # A class_swap synthetic is an implementation detail: don't fire
+         # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
+         if is_creating_synth():
+             return
+         super(owner, cls).__init_subclass__(*a, **kw)
+         _install_ga_proxy(cls)
+         return
+ 
+     return _patched_init_subclass
+ 
+ 
+ def _raise_slotted_instance_without_storage(method_name, owner):
+     o = owner.__name__
+     raise TypeError(
+         f"paramsight: ``{o}.{method_name}`` was looked up on an instance of "
+         f"{o}, which is slotted (attrs / @dataclass(slots=True) / manual "
+         f"__slots__) and has no storage for ``__orig_class__``. The instance "
+         f"can't carry its parametrization, so the alias is unrecoverable -- "
+         f"silently falling back to the unparametrized class would yield "
+         f"``NoDefault`` for the typevars, which is almost certainly a bug. "
+         f"Opt in with one of paramsight.slotted_strategies:\n\n"
+         f"  from paramsight.slotted_strategies import (\n"
+         f"      add_field, uses_class_swap, uses_side_table)\n\n"
+         f"  # 1. Real ``__orig_class__`` field; survives "
+         f"attrs.evolve / copy / pickle.\n"
+         f"  #    @add_field must sit *below* @define / @dataclass -- it runs\n"
+         f"  #    first, so the field exists before they scan the body.\n"
+         f"  @define\n"
+         f"  @add_field\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  # 2. Synthetic-subclass swap; no field pollution; survives\n"
+         f"  #    evolve / copy / pickle. Trade-off: ``type(inst) is {o}``\n"
+         f"  #    becomes False (``isinstance`` still works).\n"
+         f"  @uses_class_swap\n"
+         f"  @define\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  # 3. Out-of-band table; no field pollution; does NOT survive\n"
+         f"  #    evolve / copy / pickle; needs weakref-able instances.\n"
+         f"  @uses_side_table\n"
+         f"  @define\n"
+         f"  class {o}[T]:\n"
+         f"      ...\n\n"
+         f"  #    ((2) and (3) are equivalent to ``_paramsight_slots =\n"
+         f"  #    \"class_swap\" / \"side_table\"`` set in the class body.)\n\n"
+         f"  # 4. If you only ever call this method class-side (e.g.\n"
+         f"  #    ``{o}[int].{method_name}(...)``), no opt-in is needed --\n"
+         f"  #    this error fires only at instance lookup time."
+     )
+ 
+ 
+ def _install_ga_proxy(owner):
+     if _is_pydantic(owner):
+         return
+     if getattr(owner, "_ga_proxy_installed__", None) == owner:
+         return
+     patched_cgi = _make_patched_cgi(owner)
+     if patched_cgi is not None:
+         owner.__class_getitem__ = classmethod(patched_cgi)
+     patched_init_subclass = _make_patched_init_subclass(owner)
+     if patched_init_subclass is not None:
+         owner.__init_subclass__ = classmethod(patched_init_subclass)
+     owner._ga_proxy_installed__ = owner
+ 
+ 
+ class _TakesAlias[T, **P, R](classmethod):
+     def __init__(self, func: Callable[Concatenate[type[T], P], R]):
+         assert not isinstance(func, classmethod)
+         setattr(func, _TA_REF_ATTR, self)
+         super().__init__(func)
+ 
+     def __set_name__(self, owner, name):
+         self.name = name
+         _install_ga_proxy(owner)
+ 
+     def __get__(self, instance, owner=None) -> Callable[P, R]:
+         if instance is not None:
+             orig = get_orig_class(instance)
+             if orig is not None:
+                 owner = orig
+             else:
+                 cls = type(instance)
+-                # No alias recovered. If the class has storage (slot/field, or
+-                # ``__dict__``) or opted into an explicit strategy, this is a
+-                # legitimate unparametrized-instance call -- fall back to the
+-                # class. Otherwise the instance is slotted-without-storage and
+-                # without opt-in: silently returning ``NoDefault`` for the
+-                # typevars would mask a real bug, so raise.
++                # No alias recovered. Raise only if losing the alias actually
++                # loses information: ``cls`` must still have *free* typevars.
++                # A non-generic class, or a concrete subclass that already
++                # binds the base's typevars via its MRO (``Concrete(Base[int])``)
++                # resolves fine straight from ``type(instance)`` -- no instance
++                # alias is needed. When ``cls`` does have free typevars and is
++                # slotted-without-storage and without an opt-in strategy,
++                # silently returning ``NoDefault`` for them would mask a real
++                # bug, so raise.
+                 if (
+-                    not _has_orig_class_storage(cls)
++                    get_parameters(cls)
++                    and not _has_orig_class_storage(cls)
+                     and _slot_strategy(cls) is None
+                 ):
+                     _raise_slotted_instance_without_storage(self.name, cls)
+                 if owner is None:
+                     owner = cls
+         return super().__get__(instance, owner)
+ 
+ 
+ @overload
+ def takes_alias[T, **P, R](
+     fun_c: Callable[Concatenate[type[T], P], R], *, patch_super: bool = False
+ ) -> Callable[Concatenate[type[T], P], R]: ...
+ 
+ 
+ @overload
+ def takes_alias[T, **P, R](
+     fun_c: None = None,
+     *,
+     patch_super: bool = False,
+ ) -> Callable[
+     [Callable[Concatenate[type[T], P], R]], Callable[Concatenate[type[T], P], R]
+ ]: ...
+ 
+ 
+ def takes_alias[T, **P, R](
+     fun_c: Callable[Concatenate[type[T], P], R] | None = None,
+     *,
+     patch_super: bool = False,
+ ) -> (
+     Callable[Concatenate[type[T], P], R]
+     | Callable[
+         [Callable[Concatenate[type[T], P], R]], Callable[Concatenate[type[T], P], R]
+     ]
+ ):
+     if fun_c is None:
+         return partial(takes_alias, patch_super=patch_super)
+ 
+     cm = cast(classmethod, fun_c)
+     if not isinstance(cm, classmethod):
+         raise ValueError(f"TakesAlias must wrap a classmethod, got {type(cm)} for {cm}")
+     func = cm.__func__
+     if not patch_super:
+         return cast(Callable[Concatenate[type[T], P], R], _TakesAlias(func))
+     newfunc = inject_locals(
+         super=_super, _decorator_names=["takes_alias", "classmethod"]
+     )(func)
+     assert isinstance(newfunc, types.FunctionType)
+     return cast(Callable[Concatenate[type[T], P], R], _TakesAlias(newfunc))
+ 
+ 
+ def make_alias_instance_from_alias(alias_cls, alias):
+     return alias_cls(
+         origin=alias.__origin__,
+         args=alias.__args__,
+         inst=alias._inst,
+         name=alias._name,
+     )
+diff --git a/src/paramsight/typevar_value.py b/src/paramsight/typevar_value.py
+index 0779ab4..fb14edd 100644
+--- a/src/paramsight/typevar_value.py
++++ b/src/paramsight/typevar_value.py
+@@ -33,97 +33,100 @@ class TypeVarValue[T]:
+         Box[int].value_type        # int, statically type[int]
+         Box[str].value_type        # str, statically type[str]
+         Box[int]().value_type      # int (works on instances too)
+ 
+     The descriptor learns its *base* (the class it is defined on) once, in
+     ``__set_name__``. Resolution always happens against whatever class or
+     specialization you reach the attribute *through* — so the static type
+     (derived from that same receiver) cannot disagree with the runtime answer.
+     There is no ``cls2`` argument to wire wrong.
+ 
+     Inheritance works without ceremony: ``class Child[U](Box[U])`` then
+     ``Child[int].value_type`` resolves to ``int``, and a nested specialization
+     like ``class Arch[T](ArchBase[Wrap[T]])`` will resolve ``ArchBase``'s
+     typevar to ``Wrap[<arg>]`` when the descriptor is defined on ``ArchBase``.
+ 
+     Notes:
+     - On a *bare, unspecialized* generic class with no typevar default, reading
+       the attribute yields ``typing.NoDefault`` (the library's unresolved
+       sentinel), matching :func:`paramsight.get_args_at_base`.
+     - The type argument must be a ``TypeVar`` and must be one of the owning
+       class's typevars; otherwise ``TypeVarValue`` raises ``TypeError`` at class
+       definition time.
+     - On a pydantic ``BaseModel``, register the descriptor so pydantic doesn't
+       treat it as a field::
+ 
+           class MyModel[T](BaseModel):
+               model_config = ConfigDict(ignored_types=(TypeVarValue,))
+               value_type = TypeVarValue[T]()
+     """
+ 
+     # Tells paramsight's generic-alias attribute proxy (_GAProxy) to hand us the
+     # alias (e.g. ``Box[int]``) as ``owner`` in ``__get__`` rather than the bare
+     # origin class. Without this the descriptor would only ever see ``Box``.
+     _acm_takes_alias = True
+ 
+     _base: type
+     _name: str
+     _typevar: Any
+ 
+     def __set_name__(self, owner: type, name: str) -> None:
+         orig = getattr(self, "__orig_class__", None)
+         if orig is None:
+             raise TypeError(
+                 f"{owner.__name__}.{name}: TypeVarValue must be parameterized "
+                 f"with one of {owner.__name__}'s typevars, "
+                 f"e.g. `{name} = TypeVarValue[T]()`"
+             )
+         (typevar,) = get_args_at_base(orig, TypeVarValue)
+         if not _is_typevar(typevar):
+             raise TypeError(
+                 f"{owner.__name__}.{name}: TypeVarValue's type argument must be "
+                 f"a TypeVar, got {typevar!r}"
+             )
+         # Best-effort: for PEP 695 generics the typevars are visible already;
+         # for old-style ``Generic[T]`` classes ``__parameters__`` isn't set
+         # until ``__init_subclass__`` runs (after ``__set_name__``), so an empty
+         # result here just means "check later" — ``get_typevar_value`` will
+         # raise at access time if the typevar genuinely isn't the owner's.
+         params = list(get_parameters(owner))
+         if params and typevar not in params:
+             raise TypeError(
+                 f"{owner.__name__}.{name}: {typevar!r} is not a typevar of "
+                 f"{owner.__name__}; its typevars are {params}"
+             )
+         self._base = owner
+         self._name = name
+         self._typevar = typevar
+         # Ensure attribute access via a generic alias (Box[int].value_type)
+         # routes through the proxy that respects ``_acm_takes_alias``.
+         _install_ga_proxy(owner)
+ 
+     def __get__(
+         self, instance: object | None, owner: type | None = None, /
+     ) -> type[T]:
+         if instance is not None:
+             orig = get_orig_class(instance)
+             if orig is not None:
+                 cls = orig
+             else:
+                 cls = type(instance)
+-                # Mirror of ``_TakesAlias.__get__``: a slotted instance with no
+-                # storage for ``__orig_class__`` and no opt-in strategy would
+-                # silently resolve typevars against the unparametrized class,
+-                # masking a real bug -- raise instead.
++                # Mirror of ``_TakesAlias.__get__``: raise only when losing the
++                # alias loses information -- ``cls`` still has *free* typevars,
++                # has no ``__orig_class__`` storage, and no opt-in strategy.
++                # A non-generic class, or a concrete subclass that already binds
++                # its typevars via the MRO (``Concrete(Base[int])``), resolves
++                # fine from ``type(instance)`` and must not raise.
+                 if (
+-                    not _has_orig_class_storage(cls)
++                    get_parameters(cls)
++                    and not _has_orig_class_storage(cls)
+                     and _slot_strategy(cls) is None
+                 ):
+                     _raise_slotted_instance_without_storage(self._name, cls)
+         else:
+             cls = owner
+         if cls is None:
+             raise TypeError(
+                 f"{self._base.__name__}.{self._name}: cannot resolve without a "
+                 f"class or instance context"
+             )
+         return get_typevar_value(cls, self._base, self._typevar)  # type: ignore[return-value]
+diff --git a/tests/test_attrs_dataclass_slots.py b/tests/test_attrs_dataclass_slots.py
+index 799f818..dd7d196 100644
+--- a/tests/test_attrs_dataclass_slots.py
++++ b/tests/test_attrs_dataclass_slots.py
+@@ -1,230 +1,330 @@
+ """Slotted-class handling for ``@takes_alias`` / ``TypeVarValue``.
+ 
+ A slotted class (``attrs.define`` / ``@frozen`` / ``@dataclass(slots=True)`` /
+ manual ``__slots__``) has no ``__dict__``, so CPython's
+ ``result.__orig_class__ = alias`` from the generic alias call silently fails.
+ paramsight refuses to silently drop the parametrization -- but rather than
+ failing at class-creation time (which would punish factory-only patterns that
+ never actually need to recover the alias from an instance), it raises only at
+ the point where the silent failure would matter: when an instance-level
+ ``@takes_alias``/``TypeVarValue`` ``__get__`` couldn't recover the alias
+ and the class has no storage for ``__orig_class__`` and no opt-in.
+ 
+ Users provide one of:
+ 
+ - a real field (``__orig_class__: type | None = None`` declared in the body,
+   or via ``attrs.field``/``dataclasses.field`` to tune semantics) -- survives
+   ``attrs.evolve`` / ``copy`` / ``pickle``;
+ - ``_paramsight_slots = "side_table"`` (or ``@uses_side_table``) -- out-of-band
+   tracking (no field pollution; does NOT survive ``evolve`` / ``copy`` /
+   ``pickle``; needs weakref-able instances);
+ - ``_paramsight_slots = "class_swap"`` (or ``@uses_class_swap``) -- per-
+   parametrization synthetic subclass (no field pollution; survives ``evolve``
+   / ``copy`` / ``pickle``; ``type(inst) is Cls`` becomes False).
+ """
+ 
+ import copy
+ import inspect
+ import pickle
+ from dataclasses import dataclass
+ from dataclasses import fields as dc_fields
+ 
+ import attrs
+ import pytest
+ from attrs import define, frozen
+ 
+-from paramsight import get_args_at_base, takes_alias
++from paramsight import TypeVarValue, get_args_at_base, takes_alias
+ from paramsight.slotted_strategies import (
+     add_field,
+     uses_class_swap,
+     uses_side_table,
+ )
+ 
+ # ---------------------------------------------------------------------------
+ # The deferred raise: instance lookup is the trigger, not class creation.
+ # ---------------------------------------------------------------------------
+ 
+ 
+ def test_slotted_class_with_no_storage_defines_fine_when_only_class_side_use():
+     # Factory-only pattern: never look ``f`` up on an instance, so we don't
+     # need __orig_class__ storage. paramsight must NOT raise at class creation.
+     @define
+     class Factory[T]:
+         @takes_alias
+         @classmethod
+         def make(cls):
+             return get_args_at_base(cls, Factory)
+ 
+     assert Factory[int].make() == (int,)
+ 
+ 
+ def test_attrs_define_instance_lookup_without_storage_raises():
+     @define
+     class A[T]:
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     # Class-side: fine.
+     assert A[int].f() == (int,)
+     # Instance-side: raises with guidance.
+     inst = A[int]()
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         inst.f()
+ 
+ 
+ def test_attrs_frozen_instance_lookup_without_storage_raises():
+     @frozen
+     class A[T]:
+         x: int = 0
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         A[int](x=1).f()
+ 
+ 
+ def test_dataclass_slots_instance_lookup_without_storage_raises():
+     @dataclass(slots=True)
+     class A[T]:
+         x: int = 0
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         A[int](x=1).f()
+ 
+ 
+ def test_manual_slots_instance_lookup_without_storage_raises():
+     class A[T]:
+         __slots__ = ("x",)
+ 
+         def __init__(self, x):
+             self.x = x
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
+         A[int](x=1).f()
+ 
+ 
+ def test_unrecognised_strategy_raises_value_error_at_first_use():
+     @define
+     class A[T]:
+         _paramsight_slots = "not_a_strategy"
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(ValueError, match=r"_paramsight_slots"):
+         A[int]()
+ 
+ 
+ def test_non_slotted_dataclass_needs_no_strategy():
+     # Non-slotted classes have ``__dict__``; CPython stamps ``__orig_class__``
+     # natively. No strategy or declaration required.
+     @dataclass
+     class A[T]:
+         x: int = 0
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     assert A[int].f() == (int,)
+     assert A[int](x=1).f() == (int,)
+ 
+ 
++# ---------------------------------------------------------------------------
++# The raise must NOT fire when there is nothing to recover: a slotted class
++# with no *free* typevars (a non-generic class, or a concrete subclass that
++# already binds the base's typevars via its MRO) resolves fine straight from
++# ``type(instance)`` -- no instance alias is needed.
++# ---------------------------------------------------------------------------
++
++
++def test_non_generic_slotted_class_instance_lookup_does_not_raise():
++    # A non-generic ``@define`` class has no typevars, so there is no
++    # parametrization to lose. Instance-side ``@takes_alias`` must fall back to
++    # the class, not raise the slotted-without-storage error.
++    @define
++    class A:
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return cls
++
++    assert A.f() is A
++    assert A().f() is A
++
++
++def test_concrete_slotted_subclass_resolves_from_mro_on_instance():
++    # ``Concrete(Base[int])`` encodes ``int`` in its MRO (``__orig_bases__``);
++    # an instance carries no alias of its own and needs none. Instance-side
++    # lookup must resolve against ``type(instance)``, not raise.
++    @define
++    class Base[T]:
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return get_args_at_base(cls, Base)
++
++    @define
++    class Concrete(Base[int]):
++        pass
++
++    assert Concrete.f() == (int,)
++    assert Concrete().f() == (int,)
++
++
++def test_concrete_slotted_subclass_resolves_typevarvalue_on_instance():
++    # Same edge case via the ``TypeVarValue`` descriptor -- the fix gates both
++    # instance-side ``__get__`` sites.
++    @define
++    class Base[T]:
++        value_type = TypeVarValue[T]()
++
++    @define
++    class Concrete(Base[int]):
++        pass
++
++    assert Concrete.value_type is int
++    assert Concrete().value_type is int
++
++
++def test_slotted_subclass_with_free_typevar_still_raises():
++    # Regression guard: a subclass that still has a *free* typevar genuinely
++    # loses its parametrization when a slotted instance has no storage, so the
++    # raise must still fire here.
++    @define
++    class Base[T]:
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return get_args_at_base(cls, Base)
++
++    @define
++    class Partial[U](Base[U]):
++        pass
++
++    assert Partial[int].f() == (int,)
++    with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
++        Partial[int]().f()
++
++
++def test_slotted_subclass_binding_base_typevar_but_adding_own_still_raises():
++    # ``Sub[U](Base[int])`` binds ``Base``'s typevar (recoverable from the MRO)
++    # but adds its *own* free ``U``. An instance built as ``Sub[str]()`` really
++    # carried ``U=str``; a slotted instance with no storage drops it, so a
++    # consumer that resolves ``Sub``'s typevars would silently get ``NoDefault``.
++    # The raise must still fire -- even though the method below only needs
++    # ``Base``'s (recoverable) typevar, we cannot assume callers stop there.
++    @define
++    class Base[T]:
++        @takes_alias
++        @classmethod
++        def f(cls):
++            return get_args_at_base(cls, Base)
++
++    @define
++    class Sub[U](Base[int]):
++        pass
++
++    assert Sub[str].f() == (int,)  # class-side: fine
++    with pytest.raises(TypeError, match=r"_paramsight_slots|__orig_class__"):
++        Sub[str]().f()
++
++
+ # ---------------------------------------------------------------------------
+ # Strategy: ``_paramsight_slots = "side_table"``
+ # ---------------------------------------------------------------------------
+ 
+ 
+ @define
+ class SideTableBox[T]:
+     _paramsight_slots = "side_table"
+     x: int = 0
+ 
+     @takes_alias
+     @classmethod
+     def get_type(cls):
+         return get_args_at_base(cls, SideTableBox)
+ 
+ 
+ def test_side_table_no_field_pollution():
+     assert "__orig_class__" not in {f.name for f in attrs.fields(SideTableBox)}
+     assert "__orig_class__" not in SideTableBox.__slots__
+     sig = inspect.signature(SideTableBox.__init__)
+     assert not any("orig_class" in p for p in sig.parameters)
+     assert "__orig_class__" not in attrs.asdict(SideTableBox[int](x=1))
+     assert "orig_class" not in repr(SideTableBox[int](x=1))
+ 
+ 
+ def test_side_table_resolves_on_class_and_instance():
+     assert SideTableBox[int].get_type() == (int,)
+     assert SideTableBox[int](x=1).get_type() == (int,)
+ 
+ 
+ def test_side_table_distinct_parametrizations_dont_bleed():
+     a = SideTableBox[int](x=1)
+     b = SideTableBox[str](x=2)
+     assert a.get_type() == (int,)
+     assert b.get_type() == (str,)
+ 
+ 
+ def test_side_table_does_not_survive_evolve_or_copy():
+     """Documented limitation of side_table: fresh instances aren't in the
+     table. (Declare ``__orig_class__`` yourself if you need evolve/copy/pickle
+     preservation.)"""
+     inst = SideTableBox[int](x=1)
+     assert inst.get_type() == (int,)
+     # evolve / copy produce a fresh instance with no side-table entry;
+     # opt-in means we fall back silently (rather than raising) for the miss.
+     assert attrs.evolve(inst, x=2).get_type() != (int,)
+     assert copy.copy(inst).get_type() != (int,)
+     assert copy.deepcopy(inst).get_type() != (int,)
+ 
+ 
+ def test_side_table_unparametrized_instance_falls_back_silently():
+     # ``SideTableBox()`` (no [T]) is a legit unparametrized instance under the
+     # opt-in -- callers accept that typevars resolve against the bare class.
+     assert SideTableBox(x=1).get_type() != (int,)
+ 
+ 
+ def test_side_table_raises_loudly_when_instance_not_weakrefable():
+     @dataclass(slots=True)  # default weakref_slot=False -> not weakref-able
+     class A[T]:
+         _paramsight_slots = "side_table"
+         x: int = 0
+ 
+         @takes_alias
+         @classmethod
+         def f(cls):
+             return get_args_at_base(cls, A)
+ 
+     with pytest.raises(TypeError, match=r"not weakref-able"):
+         A[int](x=1)
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Declared ``__orig_class__`` field: user opts in by writing it themselves.
+ # This is the recommended path for evolve/copy/pickle preservation, since the
+ # user controls ``field(...)`` semantics directly.
+ # ---------------------------------------------------------------------------
+ 
+ 
+ @define
+ class FieldBox[T]:
+
+exec
+/usr/bin/zsh -lc "git show --unified=60 95b9b19 -- src/paramsight/typevar_value.py && git show 95b9b19:src/paramsight/typevar_value.py | sed -n '1,220p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+"""A property-style descriptor exposing the resolved value of a class's typevar.
+
+See :class:`TypeVarValue`.
+"""
+
+from typing import Any
+
+from paramsight._orig_class import (
+    _has_orig_class_storage,
+    _slot_strategy,
+    get_orig_class,
+)
+from paramsight._paramsight import get_args_at_base, get_typevar_value
+from paramsight.aliasclassmethod import (
+    _install_ga_proxy,
+    _raise_slotted_instance_without_storage,
+)
+from paramsight.type_utils import _is_typevar, get_parameters
+
+
+class TypeVarValue[T]:
+    """Descriptor that resolves the value of one of the owning class's typevars.
+
+    Define it on a generic class, parameterized with one of that class's own
+    typevars::
+
+        class Box[T]:
+            value_type = TypeVarValue[T]()
+
+    Reading the attribute on a specialization yields the resolved type, and the
+    static type is narrowed to ``type[T]``::
+
+        Box[int].value_type        # int, statically type[int]
+        Box[str].value_type        # str, statically type[str]
+        Box[int]().value_type      # int (works on instances too)
+
+    The descriptor learns its *base* (the class it is defined on) once, in
+    ``__set_name__``. Resolution always happens against whatever class or
+    specialization you reach the attribute *through* — so the static type
+    (derived from that same receiver) cannot disagree with the runtime answer.
+    There is no ``cls2`` argument to wire wrong.
+
+    Inheritance works without ceremony: ``class Child[U](Box[U])`` then
+    ``Child[int].value_type`` resolves to ``int``, and a nested specialization
+    like ``class Arch[T](ArchBase[Wrap[T]])`` will resolve ``ArchBase``'s
+    typevar to ``Wrap[<arg>]`` when the descriptor is defined on ``ArchBase``.
+
+    Notes:
+    - On a *bare, unspecialized* generic class with no typevar default, reading
+      the attribute yields ``typing.NoDefault`` (the library's unresolved
+      sentinel), matching :func:`paramsight.get_args_at_base`.
+    - The type argument must be a ``TypeVar`` and must be one of the owning
+      class's typevars; otherwise ``TypeVarValue`` raises ``TypeError`` at class
+      definition time.
+    - On a pydantic ``BaseModel``, register the descriptor so pydantic doesn't
+      treat it as a field::
+
+          class MyModel[T](BaseModel):
+              model_config = ConfigDict(ignored_types=(TypeVarValue,))
+              value_type = TypeVarValue[T]()
+    """
+
+    # Tells paramsight's generic-alias attribute proxy (_GAProxy) to hand us the
+    # alias (e.g. ``Box[int]``) as ``owner`` in ``__get__`` rather than the bare
+    # origin class. Without this the descriptor would only ever see ``Box``.
+    _acm_takes_alias = True
+
+    _base: type
+    _name: str
+    _typevar: Any
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        orig = getattr(self, "__orig_class__", None)
+        if orig is None:
+            raise TypeError(
+                f"{owner.__name__}.{name}: TypeVarValue must be parameterized "
+                f"with one of {owner.__name__}'s typevars, "
+                f"e.g. `{name} = TypeVarValue[T]()`"
+            )
+        (typevar,) = get_args_at_base(orig, TypeVarValue)
+        if not _is_typevar(typevar):
+            raise TypeError(
+                f"{owner.__name__}.{name}: TypeVarValue's type argument must be "
+                f"a TypeVar, got {typevar!r}"
+            )
+        # Best-effort: for PEP 695 generics the typevars are visible already;
+        # for old-style ``Generic[T]`` classes ``__parameters__`` isn't set
+        # until ``__init_subclass__`` runs (after ``__set_name__``), so an empty
+        # result here just means "check later" — ``get_typevar_value`` will
+        # raise at access time if the typevar genuinely isn't the owner's.
+        params = list(get_parameters(owner))
+        if params and typevar not in params:
+            raise TypeError(
+                f"{owner.__name__}.{name}: {typevar!r} is not a typevar of "
+                f"{owner.__name__}; its typevars are {params}"
+            )
+        self._base = owner
+        self._name = name
+        self._typevar = typevar
+        # Ensure attribute access via a generic alias (Box[int].value_type)
+        # routes through the proxy that respects ``_acm_takes_alias``.
+        _install_ga_proxy(owner)
+
+    def __get__(
+        self, instance: object | None, owner: type | None = None, /
+    ) -> type[T]:
+        if instance is not None:
+            orig = get_orig_class(instance)
+            if orig is not None:
+                cls = orig
+            else:
+                cls = type(instance)
+                # Mirror of ``_TakesAlias.__get__``: a slotted instance with no
+                # storage for ``__orig_class__`` and no opt-in strategy would
+                # silently resolve typevars against the unparametrized class,
+                # masking a real bug -- raise instead.
+                if (
+                    not _has_orig_class_storage(cls)
+                    and _slot_strategy(cls) is None
+                ):
+                    _raise_slotted_instance_without_storage(self._name, cls)
+        else:
+            cls = owner
+        if cls is None:
+            raise TypeError(
+                f"{self._base.__name__}.{self._name}: cannot resolve without a "
+                f"class or instance context"
+            )
+        return get_typevar_value(cls, self._base, self._typevar)  # type: ignore[return-value]
+
+exec
+/usr/bin/zsh -lc "git show --format='' --unified=20 95b9b19 | nl -ba | sed -n '1,260p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+     1	diff --git a/src/paramsight/__init__.py b/src/paramsight/__init__.py
+     2	index 284398f..a5fe228 100644
+     3	--- a/src/paramsight/__init__.py
+     4	+++ b/src/paramsight/__init__.py
+     5	@@ -1,15 +1,18 @@
+     6	+from paramsight._orig_class import uses_class_swap, uses_side_table
+     7	 from paramsight._paramsight import (
+     8	     get_args_at_base,
+     9	     get_resolved_typevars_for_base,
+    10	     get_typevar_value,
+    11	 )
+    12	 from paramsight.aliasclassmethod import takes_alias
+    13	 from paramsight.typevar_value import TypeVarValue
+    14	 
+    15	 __all__ = [
+    16	     "takes_alias",
+    17	     "get_resolved_typevars_for_base",
+    18	     "get_args_at_base",
+    19	     "get_typevar_value",
+    20	     "TypeVarValue",
+    21	+    "uses_side_table",
+    22	+    "uses_class_swap",
+    23	 ]
+    24	diff --git a/src/paramsight/_class_swap.py b/src/paramsight/_class_swap.py
+    25	new file mode 100644
+    26	index 0000000..6c5c857
+    27	--- /dev/null
+    28	+++ b/src/paramsight/_class_swap.py
+    29	@@ -0,0 +1,85 @@
+    30	+"""``class_swap`` strategy: carry parametrization via a synthetic subclass.
+    31	+
+    32	+``Child[int](...)`` produces an instance whose ``__class__`` is swapped to a
+    33	+cached, per-parametrization ``__slots__ = ()`` subclass of ``Child`` carrying
+    34	+``_paramsight_alias = Child[int]``. Because the synthetic adds no slots, it is
+    35	+layout-compatible with the origin, so the swap works on slotted / frozen
+    36	+instances. ``isinstance(inst, Child)`` stays ``True``; ``type(inst) is Child``
+    37	+becomes ``False`` (the documented trade-off of this strategy).
+    38	+
+    39	+It survives ``attrs.evolve`` / ``copy`` / ``deepcopy`` (those rebuild via
+    40	+``type(inst)``, which is the synthetic) and ``pickle`` (via the ``__reduce__``
+    41	+installed on the synthetic, which reconstructs the origin instance and re-swaps
+    42	+its ``__class__``; state save/restore is delegated to the normal machinery).
+    43	+"""
+    44	+
+    45	+import threading
+    46	+
+    47	+# (origin, args) -> synthetic subclass. The alias that keys a parametrization
+    48	+# is itself cached for the process's lifetime, so this never frees -- one small
+    49	+# type object per distinct parametrization actually instantiated.
+    50	+_synth_cache: dict[tuple, type] = {}
+    51	+
+    52	+# Set while we call ``type(...)`` to build a synthetic, so paramsight's patched
+    53	+# ``__init_subclass__`` can skip it (a synthetic is an implementation detail and
+    54	+# must not trigger user/base ``__init_subclass__`` hooks or re-install proxies).
+    55	+_creating = threading.local()
+    56	+
+    57	+
+    58	+def is_creating_synth() -> bool:
+    59	+    return getattr(_creating, "flag", False)
+    60	+
+    61	+
+    62	+def _args_for_getitem(args: tuple):
+    63	+    # Mirror ``typing._GenericAlias.__reduce__``: a 1-tuple of a non-tuple
+    64	+    # subscripts as a scalar (``Box[int]`` not ``Box[(int,)]``).
+    65	+    if len(args) == 1 and not isinstance(args[0], tuple):
+    66	+        return args[0]
+    67	+    return args
+    68	+
+    69	+
+    70	+def _get_or_make(origin: type, args: tuple) -> type:
+    71	+    key = (origin, args)
+    72	+    cached = _synth_cache.get(key)
+    73	+    if cached is not None:
+    74	+        return cached
+    75	+    # origin has paramsight's patched __class_getitem__ (-> _GAProxy); the
+    76	+    # checker can't model that runtime subscriptability.
+    77	+    alias = origin[_args_for_getitem(args)]  # pyright: ignore[reportIndexIssue]
+    78	+    ns = {
+    79	+        "__slots__": (),
+    80	+        "_paramsight_alias": alias,
+    81	+        "__module__": getattr(origin, "__module__", None),
+    82	+        "__qualname__": getattr(origin, "__qualname__", origin.__name__),
+    83	+        "__reduce__": _synth_reduce,
+    84	+    }
+    85	+    _creating.flag = True
+    86	+    try:
+    87	+        synth = type(origin)(origin.__name__, (origin,), ns)
+    88	+    finally:
+    89	+        _creating.flag = False
+    90	+    _synth_cache[key] = synth
+    91	+    return synth
+    92	+
+    93	+
+    94	+def get_synth(alias) -> type:
+    95	+    """The synthetic subclass for ``alias`` (a ``_GAProxy``)."""
+    96	+    return _get_or_make(alias.__origin__, alias.__args__)
+    97	+
+    98	+
+    99	+def _synth_new(origin: type, args: tuple):
+   100	+    # origin.__new__(origin) is valid for an arbitrary class at runtime;
+   101	+    # typeshed's __new__ overloads can't express it.
+   102	+    obj = origin.__new__(origin)  # pyright: ignore[reportCallIssue]
+   103	+    object.__setattr__(obj, "__class__", _get_or_make(origin, args))
+   104	+    return obj
+   105	+
+   106	+
+   107	+def _synth_reduce(self):
+   108	+    # 3-tuple ``(callable, args, state)``: pickle calls ``_synth_new`` then
+   109	+    # applies ``state`` via the instance's normal ``__setstate__`` (or the
+   110	+    # default slotted-state handling) -- so we don't reimplement state I/O.
+   111	+    alias = type(self)._paramsight_alias
+   112	+    getstate = getattr(self, "__getstate__", None)
+   113	+    state = getstate() if getstate is not None else self.__dict__
+   114	+    return (_synth_new, (alias.__origin__, alias.__args__), state)
+   115	diff --git a/src/paramsight/_orig_class.py b/src/paramsight/_orig_class.py
+   116	index cfd653f..f3704ab 100644
+   117	--- a/src/paramsight/_orig_class.py
+   118	+++ b/src/paramsight/_orig_class.py
+   119	@@ -49,72 +49,106 @@ def _is_effectively_slotted(cls: type) -> bool:
+   120	 def _has_orig_class_storage(cls: type) -> bool:
+   121	     """True if instances of ``cls`` can carry ``__orig_class__``: either via
+   122	     ``__dict__``, a ``__slots__`` entry, or an attrs/dataclass field."""
+   123	     if not _is_effectively_slotted(cls):
+   124	         return True
+   125	     for c in cls.__mro__:
+   126	         slots = c.__dict__.get("__slots__") or ()
+   127	         if isinstance(slots, str):
+   128	             slots = (slots,)
+   129	         if "__orig_class__" in slots:
+   130	             return True
+   131	     attrs_attrs = getattr(cls, "__attrs_attrs__", None)
+   132	     if attrs_attrs and any(a.name == "__orig_class__" for a in attrs_attrs):
+   133	         return True
+   134	     dc_fields = getattr(cls, "__dataclass_fields__", None)
+   135	     if dc_fields and "__orig_class__" in dc_fields:
+   136	         return True
+   137	     return False
+   138	 
+   139	 
+   140	-_VALID_SLOT_STRATEGIES = frozenset({"side_table"})
+   141	+_VALID_SLOT_STRATEGIES = frozenset({"side_table", "class_swap"})
+   142	 
+   143	 
+   144	 def _slot_strategy(owner: type) -> str | None:
+   145	     """The ``_paramsight_slots`` strategy declared on ``owner`` (or its MRO).
+   146	 
+   147	     Returns one of ``_VALID_SLOT_STRATEGIES`` or ``None``. Raises ``ValueError``
+   148	     for an unrecognised value so typos surface at first lookup.
+   149	     """
+   150	     strategy = getattr(owner, "_paramsight_slots", None)
+   151	     if strategy is None:
+   152	         return None
+   153	     if strategy not in _VALID_SLOT_STRATEGIES:
+   154	         raise ValueError(
+   155	             f"{owner.__name__}._paramsight_slots = {strategy!r}: must be one "
+   156	             f"of {sorted(_VALID_SLOT_STRATEGIES)} or unset."
+   157	         )
+   158	     return strategy
+   159	 
+   160	 
+   161	+def uses_side_table(cls: type) -> type:
+   162	+    """Class decorator: track parametrization of this slotted class's instances
+   163	+    out of band (``id``-keyed, weakref-cleaned).
+   164	+
+   165	+    No field pollution. Does NOT survive ``attrs.evolve`` / ``copy`` /
+   166	+    ``pickle``. Requires weakref-able instances (attrs ``@define`` / ``@frozen``
+   167	+    by default; ``@dataclass(slots=True)`` needs ``weakref_slot=True``).
+   168	+    Equivalent to ``_paramsight_slots = "side_table"`` in the class body.
+   169	+    """
+   170	+    cls._paramsight_slots = "side_table"  # type: ignore[attr-defined]
+   171	+    return cls
+   172	+
+   173	+
+   174	+def uses_class_swap(cls: type) -> type:
+   175	+    """Class decorator: track parametrization by swapping each instance's
+   176	+    ``__class__`` to a cached per-parametrization synthetic subclass.
+   177	+
+   178	+    No field pollution; survives ``attrs.evolve`` / ``copy`` / ``pickle``.
+   179	+    Trade-off: ``type(inst) is Cls`` becomes ``False`` (``isinstance`` still
+   180	+    works). Equivalent to ``_paramsight_slots = "class_swap"`` in the class
+   181	+    body.
+   182	+    """
+   183	+    cls._paramsight_slots = "class_swap"  # type: ignore[attr-defined]
+   184	+    return cls
+   185	+
+   186	+
+   187	 # Out-of-band ``id(instance) -> alias`` table for the "side_table" strategy.
+   188	 # Entries are removed by a ``weakref.finalize`` registered in
+   189	 # ``remember_orig_class`` (see the id-reuse note there). Individual dict ops
+   190	 # (``__setitem__`` from remember, ``pop`` from the finalizer) are atomic under
+   191	 # CPython's GIL and there is no compound read-modify-write, so this is safe in
+   192	 # normal CPython; under free-threading the usual caveats apply (mirrors the
+   193	 # library's existing multithreading note for super-injection).
+   194	 _alias_by_id: dict[int, Any] = {}
+   195	 
+   196	 
+   197	 def remember_orig_class(instance: object, alias: Any) -> bool:
+   198	     """Record ``alias`` as the parametrization of ``instance``.
+   199	 
+   200	     Returns ``True`` on success, ``False`` if the instance can't be tracked
+   201	     (not weakref-able -- without a finalizer we can't know when its ``id`` is
+   202	     free to reuse, so caching could hand a later object the wrong alias).
+   203	     """
+   204	     key = id(instance)
+   205	     try:
+   206	         weakref.finalize(instance, _alias_by_id.pop, key, None)
+   207	     except TypeError:
+   208	         return False
+   209	     _alias_by_id[key] = alias
+   210	     return True
+   211	 
+   212	 
+   213	 def get_orig_class(instance: object) -> Any | None:
+   214	-    """``instance.__orig_class__`` if present, else any side-table record."""
+   215	+    """The alias ``instance`` was constructed through, by any strategy:
+   216	+
+   217	+    1. ``__orig_class__`` (native ``__dict__`` storage, or a declared field);
+   218	+    2. ``_paramsight_alias`` on the synthetic class (``class_swap``);
+   219	+    3. the ``id``-keyed side table (``side_table``).
+   220	+    """
+   221	     orig = getattr(instance, "__orig_class__", None)
+   222	     if orig is not None:
+   223	         return orig
+   224	+    alias = getattr(type(instance), "_paramsight_alias", None)
+   225	+    if alias is not None:
+   226	+        return alias
+   227	     return _alias_by_id.get(id(instance))
+   228	diff --git a/src/paramsight/aliasclassmethod.py b/src/paramsight/aliasclassmethod.py
+   229	index 56a09de..413fcf7 100644
+   230	--- a/src/paramsight/aliasclassmethod.py
+   231	+++ b/src/paramsight/aliasclassmethod.py
+   232	@@ -1,28 +1,29 @@
+   233	 import inspect
+   234	 import types
+   235	 import typing
+   236	 from collections.abc import Callable
+   237	 from functools import cache, partial
+   238	 from types import GenericAlias
+   239	 from typing import Concatenate, cast, overload
+   240	 
+   241	+from paramsight._class_swap import is_creating_synth
+   242	 from paramsight._orig_class import (
+   243	     _has_orig_class_storage,
+   244	     _slot_strategy,
+   245	     get_orig_class,
+   246	 )
+   247	 from paramsight._ta_ref_attr import _TA_REF_ATTR
+   248	 from paramsight.alias_super import _super
+   249	 from paramsight.ga_proxy import _GAProxy
+   250	 from paramsight.inject_locals import inject_locals
+   251	 from paramsight.type_utils import _is_pydantic
+   252	 
+   253	 
+   254	 def _is_specialized_generic(cls):
+   255	     if _is_pydantic(cls):
+   256	         return cls.__pydantic_generic_metadata__["origin"] is not None
+   257	     if isinstance(
+   258	         cls,
+   259	         typing._GenericAlias,  # type:ignore[attr-defined]
+   260	     ) or isinstance(cls, GenericAlias):
+
+exec
+/usr/bin/zsh -lc "git show --format='' --unified=20 95b9b19 | nl -ba | sed -n '260,520p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+   260	     ) or isinstance(cls, GenericAlias):
+   261	         return True
+   262	@@ -55,40 +56,44 @@ def _make_patched_cgi(owner):
+   263	 
+   264	     _base_cgi = cgi
+   265	 
+   266	     @cache
+   267	     def _patched_cgi(cls, key, _base=_base_cgi):
+   268	         assert _base is _base_cgi
+   269	         alias = _base_cgi(cls, key)  # a types.GenericAlias
+   270	         assert not _is_pydantic(cls)
+   271	         return make_alias_instance_from_alias(_GAProxy, alias)  # our thin wrapper
+   272	 
+   273	     return _patched_cgi
+   274	 
+   275	 
+   276	 def _make_patched_init_subclass(owner):
+   277	     _orig_init_subclass = inspect.getattr_static(owner, "__init_subclass__")
+   278	     if hasattr(_orig_init_subclass, "__func__"):
+   279	         if _orig_init_subclass.__func__.__name__ == "_patched_init_subclass":
+   280	             return None
+   281	 
+   282	     def _patched_init_subclass(cls, *a, **kw):
+   283	+        # A class_swap synthetic is an implementation detail: don't fire
+   284	+        # user/base ``__init_subclass__`` hooks or re-install the proxy on it.
+   285	+        if is_creating_synth():
+   286	+            return
+   287	         super(owner, cls).__init_subclass__(*a, **kw)
+   288	         _install_ga_proxy(cls)
+   289	         return
+   290	 
+   291	     return _patched_init_subclass
+   292	 
+   293	 
+   294	 def _raise_slotted_instance_without_storage(method_name, owner):
+   295	     raise TypeError(
+   296	         f"paramsight: ``{owner.__name__}.{method_name}`` was looked up on an "
+   297	         f"instance of {owner.__name__}, which is slotted (attrs / "
+   298	         f"@dataclass(slots=True) / manual __slots__) and has no storage for "
+   299	         f"``__orig_class__``. The instance can't carry its parametrization, so "
+   300	         f"the alias is unrecoverable -- silently falling back to the "
+   301	         f"unparametrized class would yield ``NoDefault`` for the typevars, "
+   302	         f"which is almost certainly a bug. Pick one:\n\n"
+   303	         f"  # 1. Declare a real field (survives attrs.evolve / copy / pickle).\n"
+   304	         f"  #    Use ``attrs.field(...)`` / ``dataclasses.field(...)`` to tune\n"
+   305	         f"  #    repr / eq / init / kw_only.\n"
+   306	         f"  class {owner.__name__}[T](...):\n"
+   307	diff --git a/src/paramsight/ga_proxy.py b/src/paramsight/ga_proxy.py
+   308	index f56c582..73160c5 100644
+   309	--- a/src/paramsight/ga_proxy.py
+   310	+++ b/src/paramsight/ga_proxy.py
+   311	@@ -1,24 +1,25 @@
+   312	 import inspect
+   313	 import typing
+   314	 from typing import Any
+   315	 
+   316	+from paramsight._class_swap import get_synth
+   317	 from paramsight._is_aliasclassmethod import _is_aliasclassmethod
+   318	 from paramsight._orig_class import (
+   319	     _has_orig_class_storage,
+   320	     _slot_strategy,
+   321	     remember_orig_class,
+   322	 )
+   323	 
+   324	 _generic_alias_fields = [
+   325	     "_inst",
+   326	     "_name",
+   327	     "__origin__",
+   328	     "__call__",
+   329	     "__mro_entries__",
+   330	     "__getattr__",
+   331	     "__dir__",
+   332	     "__getitem__",
+   333	     "_determine_new_args",
+   334	     "_make_substitution",
+   335	     "copy_with",
+   336	     "__repr__",
+   337	@@ -50,49 +51,53 @@ class _GAProxy(  # type:ignore
+   338	     def __getattr__(self, name):
+   339	         origin = self.__origin__
+   340	 
+   341	         raw = inspect.getattr_static(origin, name)
+   342	         if _is_aliasclassmethod(raw):
+   343	             # alias = typing._GenericAlias(
+   344	             #     origin=self.__origin__,
+   345	             #     args=self.__args__,
+   346	             #     inst=self._inst,
+   347	             #     name=self._name,
+   348	             # )
+   349	 
+   350	             # better to return self than alias because if we return alias,
+   351	             # acm that calls other acm fails on the second call
+   352	             return raw.__get__(None, self)
+   353	         return getattr(origin, name)
+   354	 
+   355	     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+   356	         result = super().__call__(*args, **kwargs)
+   357	         # ``typing._GenericAlias.__call__`` already tried
+   358	-        # ``result.__orig_class__ = self`` and swallowed any failure. Three
+   359	-        # cases when it didn't stick:
+   360	+        # ``result.__orig_class__ = self`` and swallowed any failure. Cases
+   361	+        # when it didn't stick:
+   362	         #   1. The class has storage for ``__orig_class__`` (real slot or
+   363	         #      attrs/dataclass field) but ``__setattr__`` rejected the write
+   364	         #      (typical for ``@frozen``). Bypass via ``object.__setattr__``;
+   365	         #      if even that fails, re-raise -- storage was detected, so the
+   366	         #      caller would otherwise silently lose the parametrization.
+   367	-        #   2. ``_paramsight_slots = "side_table"`` is set: record out of
+   368	-        #      band. Raise loudly here if the instance can't be tracked at all
+   369	-        #      (not weakref-able) -- silent untracked-ness is the trap we're
+   370	-        #      preventing.
+   371	-        #   3. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
+   372	+        #   2. ``_paramsight_slots = "class_swap"``: swap ``__class__`` to a
+   373	+        #      cached synthetic ``__slots__=()`` subclass carrying the alias
+   374	+        #      (layout-compatible, so it works on slotted/frozen instances).
+   375	+        #   3. ``_paramsight_slots = "side_table"``: record out of band. Raise
+   376	+        #      loudly here if the instance can't be tracked at all (not
+   377	+        #      weakref-able) -- silent untracked-ness is the trap we prevent.
+   378	+        #   4. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
+   379	         #      / ``TypeVarValue.__get__`` will raise *if* the instance is ever
+   380	         #      looked up there. (Class-side use never needs ``__orig_class__``.)
+   381	         if getattr(result, "__orig_class__", None) is not self:
+   382	             cls = type(result)
+   383	             if _has_orig_class_storage(cls):
+   384	                 object.__setattr__(result, "__orig_class__", self)
+   385	+            elif _slot_strategy(cls) == "class_swap":
+   386	+                object.__setattr__(result, "__class__", get_synth(self))
+   387	             elif _slot_strategy(cls) == "side_table":
+   388	                 if not remember_orig_class(result, self):
+   389	                     raise TypeError(
+   390	                         f"paramsight: cannot record the parametrization of "
+   391	                         f"{self!r}: instances of {cls.__name__} are slotted "
+   392	                         f"and not weakref-able (no ``__weakref__`` slot). "
+   393	                         f"Add ``weakref_slot=True`` to your @dataclass / "
+   394	                         f"@define, or declare ``__orig_class__: type | None "
+   395	                         f"= None`` on the class to use a real field instead."
+   396	                     )
+   397	         return result
+   398	diff --git a/tests/test_attrs_dataclass_slots.py b/tests/test_attrs_dataclass_slots.py
+   399	index 76c2830..1bbcd53 100644
+   400	--- a/tests/test_attrs_dataclass_slots.py
+   401	+++ b/tests/test_attrs_dataclass_slots.py
+   402	@@ -1,53 +1,61 @@
+   403	 """Slotted-class handling for ``@takes_alias`` / ``TypeVarValue``.
+   404	 
+   405	 A slotted class (``attrs.define`` / ``@frozen`` / ``@dataclass(slots=True)`` /
+   406	 manual ``__slots__``) has no ``__dict__``, so CPython's
+   407	 ``result.__orig_class__ = alias`` from the generic alias call silently fails.
+   408	 paramsight refuses to silently drop the parametrization -- but rather than
+   409	 failing at class-creation time (which would punish factory-only patterns that
+   410	 never actually need to recover the alias from an instance), it raises only at
+   411	 the point where the silent failure would matter: when an instance-level
+   412	 ``@takes_alias``/``TypeVarValue`` ``__get__`` couldn't recover the alias
+   413	 and the class has no storage for ``__orig_class__`` and no opt-in.
+   414	 
+   415	 Users provide one of:
+   416	 
+   417	 - a real field (``__orig_class__: type | None = None`` declared in the body,
+   418	   or via ``attrs.field``/``dataclasses.field`` to tune semantics) -- survives
+   419	   ``attrs.evolve`` / ``copy`` / ``pickle``;
+   420	-- ``_paramsight_slots = "side_table"`` -- out-of-band tracking (no field
+   421	-  pollution; does NOT survive ``evolve`` / ``copy`` / ``pickle``; needs
+   422	-  weakref-able instances).
+   423	+- ``_paramsight_slots = "side_table"`` (or ``@uses_side_table``) -- out-of-band
+   424	+  tracking (no field pollution; does NOT survive ``evolve`` / ``copy`` /
+   425	+  ``pickle``; needs weakref-able instances);
+   426	+- ``_paramsight_slots = "class_swap"`` (or ``@uses_class_swap``) -- per-
+   427	+  parametrization synthetic subclass (no field pollution; survives ``evolve``
+   428	+  / ``copy`` / ``pickle``; ``type(inst) is Cls`` becomes False).
+   429	 """
+   430	 
+   431	 import copy
+   432	 import inspect
+   433	 import pickle
+   434	 from dataclasses import dataclass
+   435	 from dataclasses import fields as dc_fields
+   436	 
+   437	 import attrs
+   438	 import pytest
+   439	 from attrs import define, frozen
+   440	 
+   441	-from paramsight import get_args_at_base, takes_alias
+   442	+from paramsight import (
+   443	+    get_args_at_base,
+   444	+    takes_alias,
+   445	+    uses_class_swap,
+   446	+    uses_side_table,
+   447	+)
+   448	 
+   449	 # ---------------------------------------------------------------------------
+   450	 # The deferred raise: instance lookup is the trigger, not class creation.
+   451	 # ---------------------------------------------------------------------------
+   452	 
+   453	 
+   454	 def test_slotted_class_with_no_storage_defines_fine_when_only_class_side_use():
+   455	     # Factory-only pattern: never look ``f`` up on an instance, so we don't
+   456	     # need __orig_class__ storage. paramsight must NOT raise at class creation.
+   457	     @define
+   458	     class Factory[T]:
+   459	         @takes_alias
+   460	         @classmethod
+   461	         def make(cls):
+   462	             return get_args_at_base(cls, Factory)
+   463	 
+   464	     assert Factory[int].make() == (int,)
+   465	 
+   466	 
+   467	 def test_attrs_define_instance_lookup_without_storage_raises():
+   468	@@ -333,22 +341,163 @@ def test_dataclass_subclass_can_add_non_default_field_under_side_table():
+   469	 # ---------------------------------------------------------------------------
+   470	 # Internal: __class_getitem__ doesn't get wrapped around itself across the
+   471	 # attrs slots-rebuild.
+   472	 # ---------------------------------------------------------------------------
+   473	 
+   474	 
+   475	 def test_attrs_slots_rebuild_does_not_double_wrap_class_getitem():
+   476	     cgi = inspect.getattr_static(SideTableBox, "__class_getitem__")
+   477	     if isinstance(cgi, classmethod):
+   478	         cgi = cgi.__func__
+   479	     inner = inspect.unwrap(cgi)
+   480	     assert inner.__name__ == "_patched_cgi"
+   481	     bases = [c.cell_contents for c in (inner.__closure__ or ())]
+   482	     assert not any(
+   483	         getattr(inspect.unwrap(b), "__name__", None) == "_patched_cgi"
+   484	         for b in bases
+   485	         if callable(b)
+   486	     ), "patched __class_getitem__ was wrapped around itself"
+   487	 
+   488	 
+   489	+# ---------------------------------------------------------------------------
+   490	+# Strategy: ``class_swap`` (synthetic per-parametrization subclass)
+   491	+# ---------------------------------------------------------------------------
+   492	+
+   493	+
+   494	+@uses_class_swap
+   495	+@frozen
+   496	+class SwapBox[T]:
+   497	+    x: int = 0
+   498	+
+   499	+    @takes_alias
+   500	+    @classmethod
+   501	+    def get_type(cls):
+   502	+        return get_args_at_base(cls, SwapBox)
+   503	+
+   504	+
+   505	+def test_class_swap_resolves_on_class_and_instance():
+   506	+    assert SwapBox[int].get_type() == (int,)
+   507	+    assert SwapBox[int](x=1).get_type() == (int,)
+   508	+
+   509	+
+   510	+def test_class_swap_no_field_pollution():
+   511	+    assert "__orig_class__" not in {f.name for f in attrs.fields(SwapBox)}
+   512	+    assert "orig_class" not in repr(SwapBox[int](x=1))
+   513	+    assert "__orig_class__" not in attrs.asdict(SwapBox[int](x=1))
+   514	+
+   515	+
+   516	+def test_class_swap_isinstance_true_but_type_identity_changes():
+   517	+    inst = SwapBox[int](x=1)
+   518	+    assert isinstance(inst, SwapBox)  # subclass
+   519	+    assert type(inst) is not SwapBox  # the documented trade-off
+   520	+    assert type(inst).__name__ == "SwapBox"  # repr stays sane
+
+exec
+/usr/bin/zsh -lc "git show --format='' --unified=20 95b9b19 | nl -ba | sed -n '520,760p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+   520	+    assert type(inst).__name__ == "SwapBox"  # repr stays sane
+   521	+
+   522	+
+   523	+def test_class_swap_distinct_parametrizations_dont_bleed():
+   524	+    assert SwapBox[int](x=1).get_type() == (int,)
+   525	+    assert SwapBox[str](x=2).get_type() == (str,)
+   526	+    # same parametrization -> same synthetic class (stable identity)
+   527	+    assert type(SwapBox[int](x=1)) is type(SwapBox[int](x=9))
+   528	+
+   529	+
+   530	+def test_class_swap_survives_evolve_copy_deepcopy_pickle():
+   531	+    inst = SwapBox[int](x=1)
+   532	+    assert attrs.evolve(inst, x=2).get_type() == (int,)
+   533	+    assert copy.copy(inst).get_type() == (int,)
+   534	+    assert copy.deepcopy(inst).get_type() == (int,)
+   535	+    revived = pickle.loads(pickle.dumps(inst))
+   536	+    assert revived.get_type() == (int,)
+   537	+    assert revived.x == 1
+   538	+    assert isinstance(revived, SwapBox)
+   539	+
+   540	+
+   541	+def test_class_swap_on_dataclass_slots_and_manual_slots():
+   542	+    @uses_class_swap
+   543	+    @dataclass(slots=True)
+   544	+    class DC[T]:
+   545	+        x: int = 0
+   546	+
+   547	+        @takes_alias
+   548	+        @classmethod
+   549	+        def f(cls):
+   550	+            return get_args_at_base(cls, DC)
+   551	+
+   552	+    assert DC[int](x=1).f() == (int,)
+   553	+    assert copy.deepcopy(DC[int](x=5)).f() == (int,)
+   554	+
+   555	+    @uses_class_swap
+   556	+    class Manual[T]:
+   557	+        __slots__ = ("x",)
+   558	+
+   559	+        def __init__(self, x=0):
+   560	+            self.x = x
+   561	+
+   562	+        @takes_alias
+   563	+        @classmethod
+   564	+        def f(cls):
+   565	+            return get_args_at_base(cls, Manual)
+   566	+
+   567	+    assert Manual[int](1).f() == (int,)
+   568	+    # (pickle needs a module-level class -- covered by SwapBox above)
+   569	+    assert copy.deepcopy(Manual[int](3)).f() == (int,)
+   570	+
+   571	+
+   572	+def test_class_swap_suppresses_init_subclass_for_synthetics():
+   573	+    calls = []
+   574	+
+   575	+    class Hook:
+   576	+        def __init_subclass__(cls, **kw):
+   577	+            super().__init_subclass__(**kw)
+   578	+            calls.append(cls.__name__)
+   579	+
+   580	+    @uses_class_swap
+   581	+    @define
+   582	+    class Child[T](Hook):
+   583	+        x: int = 0
+   584	+
+   585	+        @takes_alias
+   586	+        @classmethod
+   587	+        def f(cls):
+   588	+            return get_args_at_base(cls, Child)
+   589	+
+   590	+    calls.clear()
+   591	+    # Building synthetics for these parametrizations must NOT fire Hook's
+   592	+    # __init_subclass__ (a synthetic is an implementation detail).
+   593	+    Child[int](x=1).f()
+   594	+    Child[str](x=2).f()
+   595	+    assert calls == []
+   596	+
+   597	+
+   598	+def test_class_swap_unparametrized_instance_falls_back_silently():
+   599	+    # ``SwapBox()`` (no [T]) is a legit unparametrized instance: type is the
+   600	+    # real class, no synthetic, resolution falls back to the bare class.
+   601	+    inst = SwapBox(x=1)
+   602	+    assert type(inst) is SwapBox
+   603	+    assert inst.get_type() != (int,)
+   604	+
+   605	+
+   606	+# ---------------------------------------------------------------------------
+   607	+# Decorators are equivalent to the class-body marker.
+   608	+# ---------------------------------------------------------------------------
+   609	+
+   610	+
+   611	+def test_uses_side_table_decorator_equivalent_to_marker():
+   612	+    @uses_side_table
+   613	+    @define
+   614	+    class A[T]:
+   615	+        x: int = 0
+   616	+
+   617	+        @takes_alias
+   618	+        @classmethod
+   619	+        def f(cls):
+   620	+            return get_args_at_base(cls, A)
+   621	+
+   622	+    assert A._paramsight_slots == "side_table"
+   623	+    assert A[int](x=1).f() == (int,)
+   624	+
+   625	+
+   626	+def test_uses_class_swap_decorator_sets_marker():
+   627	+    assert SwapBox._paramsight_slots == "class_swap"
+   628	+
+   629	+
+   630	 if __name__ == "__main__":
+   631	     raise SystemExit(pytest.main([__file__, "-v"]))
+
+exec
+/usr/bin/zsh -lc 'rm -rf /tmp/review95 && mkdir -p /tmp/review95 && git archive 95b9b19 | tar -x -C /tmp/review95 && cd /tmp/review95 && PYTHONPATH=src /home/g/wt/paramsight/active/review-branch/.venv/bin/python -m pytest -q' in /home/g/wt/paramsight/active/review-branch
+ exited 1 in 0ms:
+/home/g/wt/paramsight/active/review-branch/.venv/bin/python: No module named pytest
+
+exec
+/usr/bin/zsh -lc 'which uv || true; which pytest || true; python -m pytest --version || true; .venv/bin/python -m pip list 2>/dev/null | head -50 || true' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 141ms:
+pytest 9.0.1
+
+exec
+/usr/bin/zsh -lc 'cd /tmp/review95 && PYTHONPATH=src python -m pytest -q' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 2548ms:
+........................................................................ [ 54%]
+............................................................             [100%]
+132 passed in 1.16s
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+import pickle
+
+@uses_class_swap
+class A[T]:
+    __slots__=('x',)
+    def __new__(cls, x):
+        obj = super().__new__(cls)
+        return obj
+    def __init__(self,x): self.x=x
+    def __getnewargs__(self): return (self.x,)
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+
+inst=A[int](1)
+print(inst, inst.x, inst.f(), type(inst))
+try:
+    data=pickle.dumps(inst)
+    print('dumped', len(data))
+    obj=pickle.loads(data)
+    print('loaded', obj, obj.x, obj.f())
+except Exception as e:
+    import traceback; traceback.print_exc()
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+Traceback (most recent call last):
+<__main__.A object at 0x79696ffbdb70> 1 (<class 'int'>,) <class '__main__.A'>
+dumped 107
+  File "<stdin>", line 21, in <module>
+  File "/tmp/review95/src/paramsight/_class_swap.py", line 73, in _synth_new
+    obj = origin.__new__(origin)  # pyright: ignore[reportCallIssue]
+TypeError: A.__new__() missing 1 required positional argument: 'x'
+
+exec
+/usr/bin/zsh -lc 'ls src/paramsight/_class_swap.py src/paramsight/slotted_strategies/class_swap.py 2>&1 || true' in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+ls: cannot access 'src/paramsight/_class_swap.py': No such file or directory
+src/paramsight/slotted_strategies/class_swap.py
+
+exec
+/usr/bin/zsh -lc "git show 95b9b19:src/paramsight/_class_swap.py | nl -ba | sed -n '1,120p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+     1	"""``class_swap`` strategy: carry parametrization via a synthetic subclass.
+     2	
+     3	``Child[int](...)`` produces an instance whose ``__class__`` is swapped to a
+     4	cached, per-parametrization ``__slots__ = ()`` subclass of ``Child`` carrying
+     5	``_paramsight_alias = Child[int]``. Because the synthetic adds no slots, it is
+     6	layout-compatible with the origin, so the swap works on slotted / frozen
+     7	instances. ``isinstance(inst, Child)`` stays ``True``; ``type(inst) is Child``
+     8	becomes ``False`` (the documented trade-off of this strategy).
+     9	
+    10	It survives ``attrs.evolve`` / ``copy`` / ``deepcopy`` (those rebuild via
+    11	``type(inst)``, which is the synthetic) and ``pickle`` (via the ``__reduce__``
+    12	installed on the synthetic, which reconstructs the origin instance and re-swaps
+    13	its ``__class__``; state save/restore is delegated to the normal machinery).
+    14	"""
+    15	
+    16	import threading
+    17	
+    18	# (origin, args) -> synthetic subclass. The alias that keys a parametrization
+    19	# is itself cached for the process's lifetime, so this never frees -- one small
+    20	# type object per distinct parametrization actually instantiated.
+    21	_synth_cache: dict[tuple, type] = {}
+    22	
+    23	# Set while we call ``type(...)`` to build a synthetic, so paramsight's patched
+    24	# ``__init_subclass__`` can skip it (a synthetic is an implementation detail and
+    25	# must not trigger user/base ``__init_subclass__`` hooks or re-install proxies).
+    26	_creating = threading.local()
+    27	
+    28	
+    29	def is_creating_synth() -> bool:
+    30	    return getattr(_creating, "flag", False)
+    31	
+    32	
+    33	def _args_for_getitem(args: tuple):
+    34	    # Mirror ``typing._GenericAlias.__reduce__``: a 1-tuple of a non-tuple
+    35	    # subscripts as a scalar (``Box[int]`` not ``Box[(int,)]``).
+    36	    if len(args) == 1 and not isinstance(args[0], tuple):
+    37	        return args[0]
+    38	    return args
+    39	
+    40	
+    41	def _get_or_make(origin: type, args: tuple) -> type:
+    42	    key = (origin, args)
+    43	    cached = _synth_cache.get(key)
+    44	    if cached is not None:
+    45	        return cached
+    46	    # origin has paramsight's patched __class_getitem__ (-> _GAProxy); the
+    47	    # checker can't model that runtime subscriptability.
+    48	    alias = origin[_args_for_getitem(args)]  # pyright: ignore[reportIndexIssue]
+    49	    ns = {
+    50	        "__slots__": (),
+    51	        "_paramsight_alias": alias,
+    52	        "__module__": getattr(origin, "__module__", None),
+    53	        "__qualname__": getattr(origin, "__qualname__", origin.__name__),
+    54	        "__reduce__": _synth_reduce,
+    55	    }
+    56	    _creating.flag = True
+    57	    try:
+    58	        synth = type(origin)(origin.__name__, (origin,), ns)
+    59	    finally:
+    60	        _creating.flag = False
+    61	    _synth_cache[key] = synth
+    62	    return synth
+    63	
+    64	
+    65	def get_synth(alias) -> type:
+    66	    """The synthetic subclass for ``alias`` (a ``_GAProxy``)."""
+    67	    return _get_or_make(alias.__origin__, alias.__args__)
+    68	
+    69	
+    70	def _synth_new(origin: type, args: tuple):
+    71	    # origin.__new__(origin) is valid for an arbitrary class at runtime;
+    72	    # typeshed's __new__ overloads can't express it.
+    73	    obj = origin.__new__(origin)  # pyright: ignore[reportCallIssue]
+    74	    object.__setattr__(obj, "__class__", _get_or_make(origin, args))
+    75	    return obj
+    76	
+    77	
+    78	def _synth_reduce(self):
+    79	    # 3-tuple ``(callable, args, state)``: pickle calls ``_synth_new`` then
+    80	    # applies ``state`` via the instance's normal ``__setstate__`` (or the
+    81	    # default slotted-state handling) -- so we don't reimplement state I/O.
+    82	    alias = type(self)._paramsight_alias
+    83	    getstate = getattr(self, "__getstate__", None)
+    84	    state = getstate() if getstate is not None else self.__dict__
+    85	    return (_synth_new, (alias.__origin__, alias.__args__), state)
+
+exec
+/usr/bin/zsh -lc "sed -n '1,160p' src/paramsight/slotted_strategies/class_swap.py" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+"""``class_swap`` strategy: carry parametrization via a synthetic subclass.
+
+``Child[int](...)`` produces an instance whose ``__class__`` is swapped to a
+cached, per-parametrization ``__slots__ = ()`` subclass of ``Child`` carrying
+``_paramsight_alias = Child[int]``. Because the synthetic adds no slots, it is
+layout-compatible with the origin, so the swap works on slotted / frozen
+instances. ``isinstance(inst, Child)`` stays ``True``; ``type(inst) is Child``
+becomes ``False`` (the documented trade-off of this strategy).
+
+It survives ``attrs.evolve`` / ``copy`` / ``deepcopy`` (those rebuild via
+``type(inst)``, which is the synthetic) and ``pickle`` (via the ``__reduce__``
+installed on the synthetic, which reconstructs the origin instance and re-swaps
+its ``__class__``; state save/restore is delegated to the normal machinery).
+"""
+
+import threading
+
+# (origin, args) -> synthetic subclass. The alias that keys a parametrization
+# is itself cached for the process's lifetime, so this never frees -- one small
+# type object per distinct parametrization actually instantiated.
+_synth_cache: dict[tuple, type] = {}
+
+# Set while we call ``type(...)`` to build a synthetic, so paramsight's patched
+# ``__init_subclass__`` can skip it (a synthetic is an implementation detail and
+# must not trigger user/base ``__init_subclass__`` hooks or re-install proxies).
+_creating = threading.local()
+
+
+def is_creating_synth() -> bool:
+    return getattr(_creating, "flag", False)
+
+
+def _args_for_getitem(args: tuple):
+    # Mirror ``typing._GenericAlias.__reduce__``: a 1-tuple of a non-tuple
+    # subscripts as a scalar (``Box[int]`` not ``Box[(int,)]``).
+    if len(args) == 1 and not isinstance(args[0], tuple):
+        return args[0]
+    return args
+
+
+def _get_or_make(origin: type, args: tuple) -> type:
+    key = (origin, args)
+    cached = _synth_cache.get(key)
+    if cached is not None:
+        return cached
+    # origin has paramsight's patched __class_getitem__ (-> _GAProxy); the
+    # checker can't model that runtime subscriptability.
+    alias = origin[_args_for_getitem(args)]  # pyright: ignore[reportIndexIssue]
+    ns = {
+        "__slots__": (),
+        "_paramsight_alias": alias,
+        "__module__": getattr(origin, "__module__", None),
+        "__qualname__": getattr(origin, "__qualname__", origin.__name__),
+        "__reduce__": _synth_reduce,
+    }
+    _creating.flag = True
+    try:
+        synth = type(origin)(origin.__name__, (origin,), ns)
+    finally:
+        _creating.flag = False
+    _synth_cache[key] = synth
+    return synth
+
+
+def get_synth(alias) -> type:
+    """The synthetic subclass for ``alias`` (a ``_GAProxy``)."""
+    return _get_or_make(alias.__origin__, alias.__args__)
+
+
+def _synth_new(origin: type, args: tuple):
+    # origin.__new__(origin) is valid for an arbitrary class at runtime;
+    # typeshed's __new__ overloads can't express it.
+    obj = origin.__new__(origin)  # pyright: ignore[reportCallIssue]
+    object.__setattr__(obj, "__class__", _get_or_make(origin, args))
+    return obj
+
+
+def _synth_reduce(self):
+    # 3-tuple ``(callable, args, state)``: pickle calls ``_synth_new`` then
+    # applies ``state`` via the instance's normal ``__setstate__`` (or the
+    # default slotted-state handling) -- so we don't reimplement state I/O.
+    alias = type(self)._paramsight_alias
+    getstate = getattr(self, "__getstate__", None)
+    state = getstate() if getstate is not None else self.__dict__
+    return (_synth_new, (alias.__origin__, alias.__args__), state)
+
+
+def uses_class_swap(cls: type) -> type:
+    """Class decorator: track parametrization by swapping each instance's
+    ``__class__`` to a cached per-parametrization synthetic subclass.
+
+    No field pollution; survives ``attrs.evolve`` / ``copy`` / ``pickle``.
+    Trade-off: ``type(inst) is Cls`` becomes ``False`` (``isinstance`` still
+    works). Equivalent to ``_paramsight_slots = "class_swap"`` in the class
+    body.
+    """
+    cls._paramsight_slots = "class_swap"  # type: ignore[attr-defined]
+    return cls
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+import copy
+
+@uses_class_swap
+class A[T]:
+    __slots__=('x',)
+    def __new__(cls, x):
+        obj=super().__new__(cls); return obj
+    def __init__(self,x): self.x=x
+    def __getnewargs__(self): return (self.x,)
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+inst=A[int](1)
+for fn in [copy.copy, copy.deepcopy]:
+    try:
+        o=fn(inst); print(fn.__name__, o.x, o.f())
+    except Exception as e:
+        print(fn.__name__, type(e), e)
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 105ms:
+exec
+/usr/bin/zsh -lc "sed -n '1,280p' /tmp/review95/src/paramsight/_paramsight.py && sed -n '1,220p' /tmp/review95/src/paramsight/type_utils.py" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+import typing
+from functools import cache
+from types import GenericAlias, get_original_bases
+from typing import Any
+
+from paramsight.type_utils import (
+    TypeVar,
+    _get_typevar_default,
+    _is_typevar,
+    get_args_robust,
+    get_origin_robust,
+    get_parameters,
+    is_generic_alias,
+)
+
+_NODEFAULT = typing.NoDefault
+
+
+def _substitute_typevars(value: Any, subs: dict[TypeVar, Any]) -> Any:
+    """Recursively substitute typevars inside a type or generic alias."""
+    if value is None:
+        return None
+    if _is_typevar(value):
+        return subs.get(value, value)
+    if is_generic_alias(value):
+        origin = get_origin_robust(value)
+        args = get_args_robust(value)
+        new_args = tuple(_substitute_typevars(a, subs) for a in args)
+        if new_args == args or origin is None:
+            return value
+        subscript = new_args[0] if len(new_args) == 1 else new_args
+        return origin.__class_getitem__(subscript)  # type: ignore[attr-defined]
+    return value
+
+
+def _build_subs(
+    origin: type,
+    args: tuple[Any, ...],
+    return_bound_as_fallback: bool,
+) -> dict[TypeVar, Any]:
+    """Bind ``origin``'s typevars to either positional args, defaults, or
+    (when requested) bounds. Typevars with no resolution map to NoDefault so
+    that they propagate as the unresolved sentinel through nested aliases."""
+    subs: dict[TypeVar, Any] = {}
+    for i, p in enumerate(get_parameters(origin)):
+        if not _is_typevar(p):
+            continue
+        if i < len(args):
+            subs[p] = args[i]
+            continue
+        default = _get_typevar_default(p)
+        if default is not _NODEFAULT:
+            subs[p] = default
+            continue
+        if return_bound_as_fallback:
+            bound = getattr(p, "__bound__", None)
+            if bound is not None:
+                subs[p] = bound
+                continue
+        subs[p] = _NODEFAULT
+    return subs
+
+
+def _resolve(
+    node: Any,
+    target_base: type,
+    parent_subs: dict[TypeVar, Any],
+    return_bound_as_fallback: bool,
+) -> tuple[Any, ...] | None:
+    """DFS through ``node``'s inheritance hierarchy looking for ``target_base``.
+
+    ``parent_subs`` is the substitution map accumulated from outer levels and
+    is applied to ``node``'s args before computing this level's own
+    substitution map. When ``origin`` matches ``target_base`` we read the
+    target's own typevars out of the freshly-built map.
+    """
+    if is_generic_alias(node):
+        origin = get_origin_robust(node)
+        if origin is None:
+            return None
+        args = tuple(
+            _substitute_typevars(a, parent_subs) for a in get_args_robust(node)
+        )
+    elif isinstance(node, type):
+        origin = node
+        args = ()
+    else:
+        return None
+
+    subs = _build_subs(origin, args, return_bound_as_fallback)
+
+    if origin is target_base:
+        params = get_parameters(target_base)
+        # Builtin generics (list, dict, tuple, collections.abc.*, ...) don't
+        # expose their type parameters via __type_params__/__parameters__, so
+        # ``params`` is empty even though we arrived via e.g. ``list[list[T]]``.
+        # In that case fall back to the (already-substituted) args we walked to.
+        if not params and args:
+            return args
+        return tuple(
+            subs[p] if _is_typevar(p) and p in subs else p
+            for p in params
+        )
+
+    for base in get_original_bases(origin):
+        base_origin = get_origin_robust(base) if is_generic_alias(base) else base
+        if base_origin is typing.Generic:
+            continue
+        result = _resolve(base, target_base, subs, return_bound_as_fallback)
+        if result is not None:
+            return result
+    return None
+
+
+@cache
+def get_args_at_base(
+    cls: type | GenericAlias,
+    target_base: type,
+    return_bound_as_fallback: bool = False,
+) -> tuple[type | GenericAlias | None, ...]:
+    """Resolve ``target_base``'s type parameters as seen from ``cls``.
+
+    Like :func:`typing.get_args`, but evaluated at an ancestor base anywhere
+    in ``cls``'s inheritance hierarchy rather than only at the immediate
+    generic alias. Returns one entry per typevar of ``target_base``.
+    """
+    result = _resolve(cls, target_base, {}, return_bound_as_fallback)
+    if result is None:
+        raise ValueError(
+            f"failed to locate target base {target_base!r} in hierarchy of {cls!r}"
+        )
+    return result
+
+
+# Legacy alias — prefer ``get_args_at_base``. Same object, so it shares the cache.
+get_resolved_typevars_for_base = get_args_at_base
+
+
+def get_typevar_value(
+    cls: type | GenericAlias,
+    target_base: type,
+    typevar: TypeVar,
+    return_bound_as_fallback: bool = False,
+) -> Any:
+    """Resolve a single, named typevar of ``target_base`` as seen from ``cls``.
+
+    Where :func:`get_args_at_base` returns all of ``target_base``'s args
+    positionally, this looks one up by TypeVar identity. Returns the resolved
+    value (a type, a generic alias, or ``typing.NoDefault`` when the typevar is
+    unspecialized and has no default).
+
+    This is the untyped escape hatch; for a statically-typed surface, see
+    :class:`paramsight.TypeVarValue`.
+    """
+    params = list(get_parameters(target_base))
+    try:
+        idx = params.index(typevar)
+    except ValueError:
+        raise ValueError(
+            f"{typevar!r} is not a typevar of {target_base!r}; "
+            f"its typevars are {params}"
+        ) from None
+    return get_args_at_base(cls, target_base, return_bound_as_fallback)[idx]
+import types
+import typing
+from collections.abc import Callable
+from types import GenericAlias
+from typing import (
+    Annotated,
+    Any,
+    TypeGuard,
+    TypeIs,
+    TypeVar,
+    cast,
+    get_args,
+    get_origin,
+)
+
+from pydantic import BaseModel
+
+type AliasType = GenericAlias | typing._GenericAlias  # type: ignore
+
+_NODEFAULT = typing.NoDefault
+
+
+def get_args_robust(t: Any) -> tuple[Any, ...]:
+    """
+    does typing.get_args but handles pydantic generic aliases as well
+    """
+    if _is_pydantic(t):
+        if not hasattr(t, "__pydantic_generic_metadata__"):
+            return ()
+        return t.__pydantic_generic_metadata__["args"]
+    return get_args(t)
+
+
+def get_origin_robust(ga: Any) -> type | None:
+    """
+    does typing.get_origin but handles pydantic generic aliases as well
+    """
+    if _is_pydantic(ga):
+        if not hasattr(ga, "__pydantic_generic_metadata__"):
+            return None
+        res = ga.__pydantic_generic_metadata__["origin"]
+        return res
+    else:
+        res = get_origin(ga)
+    if res is typing.Union:
+        # `types.UnionType` is the runtime origin of `X | Y`; it's a class,
+        # but pyright won't narrow type[UnionType] to `type` (it's @final).
+        return cast(type, types.UnionType)
+    assert isinstance(res, type | None)
+    return res
+
+
+def _is_typevar(x: Any) -> TypeGuard[TypeVar]:
+    if isinstance(x, TypeVar):
+        return True
+    return getattr(x, "__class__", type(x)).__name__ == "TypeVar"
+
+
+def _get_typevar_default(tv: Any) -> Any:
+    return getattr(tv, "__default__", getattr(tv, "default", _NODEFAULT))
+
+
+def unwrap_annotated(param: Any) -> type:
+    inner = get_origin_robust(param)
+    if inner is Annotated:
+        return unwrap_annotated(get_args_robust(param)[0])
+    return param
+
+
+def is_generic_alias(cls: type | GenericAlias) -> TypeGuard[GenericAlias]:
+    if _is_pydantic(cls):
+        if not hasattr(cls, "__pydantic_generic_metadata__"):
+            return False
+        return cls.__pydantic_generic_metadata__["origin"] is not None
+    if isinstance(cls, typing._GenericAlias):  # type: ignore
+        return True
+    elif isinstance(cls, GenericAlias):
+        return True
+    return False
+
+
+def _make_type_guard[T](t: type[T]) -> Callable[[Any], TypeGuard[T]]:
+    def guard(obj: Any) -> TypeGuard[T]:
+        return isinstance(obj, t)
+
+    return guard
+
+
+def _make_typeis_guard[T](t: type[T]) -> Callable[[Any], TypeIs[T]]:
+    def guard(obj: Any) -> TypeIs[T]:
+        return isinstance(obj, t)
+
+    return guard
+
+
+def _assert_is_instance[T](obj: Any, cls: type[T]) -> T:
+    assert _make_typeis_guard(cls)(obj)
+    return obj
+
+
+def _make_issubclass_guard[T](t: type[T]) -> Callable[[Any], TypeGuard[type[T]]]:
+    def guard(obj: Any) -> TypeGuard[type[T]]:
+        return issubclass(obj, t)
+
+    return guard
+
+
+def get_parameters(cls: type | GenericAlias):
+    orig = get_origin_robust(cls) or cls
+    assert isinstance(orig, type)
+    old_style_params = getattr(orig, "__parameters__", get_args_robust(cls))
+    if len(orig.__type_params__) != len(old_style_params):
+        if not old_style_params:
+            return orig.__type_params__
+        if not orig.__type_params__:
+            return old_style_params
+        raise ValueError(
+            f"""inconsistent number of parameters for {orig.__name__}: 
+            {orig.__type_params__} != {old_style_params}
+            """
+        )
+    return orig.__type_params__
+
+
+def get_num_typevars(cls: type | GenericAlias) -> int:
+    return len(get_parameters(cls))
+
+
+pydantic_model_metaclass = type(BaseModel)
+
+
+def _is_pydantic(cls):
+    return (
+        isinstance(cls, BaseModel)
+        or isinstance(cls, pydantic_model_metaclass)
+        or (
+            isinstance(cls, type)
+            and (
+                issubclass(cls, BaseModel) or issubclass(cls, pydantic_model_metaclass)
+            )
+        )
+    )
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from dataclasses import dataclass, replace
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+import copy, pickle
+@uses_class_swap
+@dataclass(slots=True, frozen=True)
+class D[T]:
+    x:int=0
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,D)
+inst=D[int](1)
+print(inst.f(), type(inst), isinstance(inst,D))
+print(replace(inst,x=2).f())
+print(copy.copy(inst).f(), copy.deepcopy(inst).f())
+print(pickle.loads(pickle.dumps(inst)).f())
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+(<class 'int'>,) <class '__main__.D'> True
+(<class 'int'>,)
+(<class 'int'>,) (<class 'int'>,)
+(<class 'int'>,)
+
+exec
+/usr/bin/zsh -lc "python - <<'PY'
+class A[T]: pass
+for x in [int, (int,str), tuple[int,str]]:
+    try:
+        a=A[x]
+        print(x, a, a.__args__)
+    except Exception as e: print('err',x,e)
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+<class 'int'> __main__.A[int] (<class 'int'>,)
+err (<class 'int'>, <class 'str'>) Too many arguments for <class '__main__.A'>; actual 2, expected 1
+tuple[int, str] __main__.A[tuple[int, str]] (tuple[int, str],)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+import pickle, copy
+
+def rebuild(x):
+    return A(x)
+
+@uses_class_swap
+class A[T]:
+    __slots__=('x',)
+    def __init__(self,x): self.x=x
+    def __reduce_ex__(self, proto):
+        return (rebuild, (self.x,))
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+
+inst=A[int](1)
+print(inst.f(), type(inst))
+for fn in [copy.copy, copy.deepcopy, lambda o: pickle.loads(pickle.dumps(o))]:
+    try:
+        o=fn(inst); print(fn, type(o), getattr(o,'x',None), o.f())
+    except Exception as e:
+        import traceback; traceback.print_exc()
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+(<class 'int'>,) <class '__main__.A'>
+<function copy at 0x737942b64ea0> <class '__main__.A'> 1 (typing.NoDefault,)
+<function deepcopy at 0x737942b64fe0> <class '__main__.A'> 1 (typing.NoDefault,)
+<function <lambda> at 0x7379429482c0> <class '__main__.A'> 1 (typing.NoDefault,)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+import pickle
+@uses_class_swap
+class A[T]:
+    __slots__=('x',)
+    def __new__(cls, *, x):
+        obj=super().__new__(cls); return obj
+    def __init__(self, *, x): self.x=x
+    def __getnewargs_ex__(self): return ((), {'x': self.x})
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+inst=A[int](x=1)
+print(inst.f())
+print(pickle.loads(pickle.dumps(inst)))
+PY" in /home/g/wt/paramsight/active/review-branch
+ exited 1 in 101ms:
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+
+class SubBase: pass
+
+@uses_class_swap
+class A[T]:
+    __slots__=()
+    def __new__(cls):
+        if cls is A:
+            return super().__new__(B)
+        return super().__new__(cls)
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+
+class B(A):
+    __slots__=()
+
+try:
+    inst=A[int]()
+    print('inst', type(inst), isinstance(inst,B), inst.f())
+except Exception as e:
+    import traceback; traceback.print_exc()
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+inst <class '__main__.A'> False (<class 'int'>,)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class A[T]:
+    __slots__=()
+    def __new__(cls):
+        return super().__new__(B)
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+class B(A):
+    __slots__=()
+    def special(self): return 'b'
+inst=A[int]()
+print(type(inst) is B, isinstance(inst,B), hasattr(inst,'special'), inst.f())
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+False False False (<class 'int'>,)
+
+exec
+/usr/bin/zsh -lc "git show 95b9b19:src/paramsight/ga_proxy.py | nl -ba | sed -n '70,110p'" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+    70	        # ``typing._GenericAlias.__call__`` already tried
+    71	        # ``result.__orig_class__ = self`` and swallowed any failure. Cases
+    72	        # when it didn't stick:
+    73	        #   1. The class has storage for ``__orig_class__`` (real slot or
+    74	        #      attrs/dataclass field) but ``__setattr__`` rejected the write
+    75	        #      (typical for ``@frozen``). Bypass via ``object.__setattr__``;
+    76	        #      if even that fails, re-raise -- storage was detected, so the
+    77	        #      caller would otherwise silently lose the parametrization.
+    78	        #   2. ``_paramsight_slots = "class_swap"``: swap ``__class__`` to a
+    79	        #      cached synthetic ``__slots__=()`` subclass carrying the alias
+    80	        #      (layout-compatible, so it works on slotted/frozen instances).
+    81	        #   3. ``_paramsight_slots = "side_table"``: record out of band. Raise
+    82	        #      loudly here if the instance can't be tracked at all (not
+    83	        #      weakref-able) -- silent untracked-ness is the trap we prevent.
+    84	        #   4. No storage, no opt-in: do nothing here; ``_TakesAlias.__get__``
+    85	        #      / ``TypeVarValue.__get__`` will raise *if* the instance is ever
+    86	        #      looked up there. (Class-side use never needs ``__orig_class__``.)
+    87	        if getattr(result, "__orig_class__", None) is not self:
+    88	            cls = type(result)
+    89	            if _has_orig_class_storage(cls):
+    90	                object.__setattr__(result, "__orig_class__", self)
+    91	            elif _slot_strategy(cls) == "class_swap":
+    92	                object.__setattr__(result, "__class__", get_synth(self))
+    93	            elif _slot_strategy(cls) == "side_table":
+    94	                if not remember_orig_class(result, self):
+    95	                    raise TypeError(
+    96	                        f"paramsight: cannot record the parametrization of "
+    97	                        f"{self!r}: instances of {cls.__name__} are slotted "
+    98	                        f"and not weakref-able (no ``__weakref__`` slot). "
+    99	                        f"Add ``weakref_slot=True`` to your @dataclass / "
+   100	                        f"@define, or declare ``__orig_class__: type | None "
+   101	                        f"= None`` on the class to use a real field instead."
+   102	                    )
+   103	        return result
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class L[T](list):
+    __slots__=()
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,L)
+try:
+    x=L[int]([1,2])
+    print(type(x), x, x.f())
+except Exception as e:
+    import traceback; traceback.print_exc()
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 107ms:
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from typing import Generic, TypeVar
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+T=TypeVar('T')
+@uses_class_swap
+class A(Generic[T]):
+    __slots__=()
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+print(A[int]().f(), type(A[int]()))
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 101ms:
+exec
+/usr/bin/zsh -lc "python - <<'PY'
+class A[T]: pass
+ga=A[int]
+print(type(ga), hasattr(ga,'_inst'), hasattr(ga,'_name'), ga)
+print(getattr(ga,'_inst',None), getattr(ga,'_name',None))
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+<class 'typing._GenericAlias'> True True __main__.A[int]
+True None
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from attrs import define
+from paramsight import uses_side_table, takes_alias, get_args_at_base
+@define
+@uses_side_table
+class A[T]:
+  x:int=0
+  @takes_alias
+  @classmethod
+  def f(cls): return get_args_at_base(cls,A)
+print(A._paramsight_slots, A[int](1).f())
+from dataclasses import dataclass
+@dc if False else dataclass(slots=True)
+class Dummy: pass
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 105ms:
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class A[T]:
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+inst=A[int]()
+print(type(inst) is A, inst.__dict__, inst.f())
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+True {'__orig_class__': __main__.A[int]} (<class 'int'>,)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class A[T]:
+    __slots__=()
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+inst=A[int](); S=type(inst); print(S, S is A, S[int], S[int].__origin__ is S, S[int].__origin__ is A)
+try: print(S[str]().f())
+except Exception as e: import traceback; traceback.print_exc()
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+<class '__main__.A'> False __main__.A[int] True False
+(typing.NoDefault,)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class A[T]:
+    __slots__=()
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+inst=A[int]()
+print(inst.f())
+print(type(inst).f())
+print(inst.__class__._paramsight_alias.f())
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 113ms:
+(<class 'int'>,)
+(typing.NoDefault,)
+(<class 'int'>,)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from attrs import define
+from paramsight import uses_class_swap, TypeVarValue
+@uses_class_swap
+@define
+class A[T]:
+    t=TypeVarValue[T]()
+print(A[int]().t)
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+<class 'int'>
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class A[T]:
+  __slots__=()
+  @takes_alias
+  @classmethod
+  def f(cls): return get_args_at_base(cls,A)
+inst=A[int](); S=type(inst)
+print('A params', A.__type_params__)
+print('S dict has', '__type_params__' in S.__dict__, getattr(S,'__type_params__',None))
+print('orig bases', S.__orig_bases__ if hasattr(S,'__orig_bases__') else None)
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+A params (T,)
+S dict has False ()
+orig bases (typing.Generic[T],)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from types import get_original_bases
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class A[T]:
+  __slots__=()
+  @takes_alias
+  @classmethod
+  def f(cls): return get_args_at_base(cls,A)
+S=type(A[int]())
+print(S.__bases__)
+print(get_original_bases(S))
+print(S.__mro__)
+print(get_args_at_base(S,A))
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+(<class '__main__.A'>,)
+(<class '__main__.A'>,)
+(<class '__main__.A'>, <class '__main__.A'>, <class 'typing.Generic'>, <class 'object'>)
+(typing.NoDefault,)
+
+exec
+/usr/bin/zsh -lc "PYTHONPATH=/tmp/review95/src python - <<'PY'
+from paramsight import uses_class_swap, takes_alias, get_args_at_base
+@uses_class_swap
+class A[T]:
+    __slots__=()
+    def __new__(cls): return super().__new__(B)
+    @takes_alias
+    @classmethod
+    def f(cls): return get_args_at_base(cls,A)
+class B(A):
+    __slots__=('y',)
+try: print(A[int]())
+except Exception as e: import traceback; traceback.print_exc()
+PY" in /home/g/wt/paramsight/active/review-branch
+ succeeded in 0ms:
+Traceback (most recent call last):
+  File "<stdin>", line 11, in <module>
+  File "/tmp/review95/src/paramsight/ga_proxy.py", line 92, in __call__
+    object.__setattr__(result, "__class__", get_synth(self))
+    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: __class__ assignment: 'A' object layout differs from 'B'
+
+codex
+The class_swap implementation has correctness gaps around preserving the actual constructed type and around pickle/copy reconstruction protocols. These can cause construction failures or silent loss of parametrization in realistic slotted generic classes.
+
+Full review comments:
+
+- [P2] Preserve subclasses returned by constructors — /home/g/wt/paramsight/active/review-branch/src/paramsight/ga_proxy.py:92-92
+  When `__new__` or a metaclass `__call__` returns a slotted subclass, `cls` is the actual result type, but this line always swaps the instance to a synthetic subclass of the alias origin. That either strips the returned subclass identity and methods when layouts match, or raises a `TypeError` when the subclass adds slots; generic alias construction should preserve the object type the constructor returned while attaching the alias.
+
+- [P2] Override reduce_ex for synthetic classes — /home/g/wt/paramsight/active/review-branch/src/paramsight/_class_swap.py:54-54
+  If the origin class defines `__reduce_ex__`, the synthetic subclass inherits it and pickle/copy will call that before consulting this `__reduce__`, bypassing `_synth_reduce`. In that case class-swap instances are reconstructed according to the origin's reducer, usually as the origin class without `_paramsight_alias`, so subsequent `@takes_alias`/`TypeVarValue` lookups lose the parametrization despite the strategy claiming copy/pickle survival.
+
+- [P2] Honor new-args during reconstruction — /home/g/wt/paramsight/active/review-branch/src/paramsight/_class_swap.py:73-73
+  For a class-swap class whose `__new__` requires arguments, unpickling or copying reaches `_synth_new` and calls `origin.__new__(origin)` with no args, even if the class implements `__getnewargs__`/`__getnewargs_ex__` and is otherwise picklable. This raises `TypeError` and breaks the advertised copy/pickle preservation for slotted immutable or factory-style classes.
+The class_swap implementation has correctness gaps around preserving the actual constructed type and around pickle/copy reconstruction protocols. These can cause construction failures or silent loss of parametrization in realistic slotted generic classes.
+
+Full review comments:
+
+- [P2] Preserve subclasses returned by constructors — /home/g/wt/paramsight/active/review-branch/src/paramsight/ga_proxy.py:92-92
+  When `__new__` or a metaclass `__call__` returns a slotted subclass, `cls` is the actual result type, but this line always swaps the instance to a synthetic subclass of the alias origin. That either strips the returned subclass identity and methods when layouts match, or raises a `TypeError` when the subclass adds slots; generic alias construction should preserve the object type the constructor returned while attaching the alias.
+
+- [P2] Override reduce_ex for synthetic classes — /home/g/wt/paramsight/active/review-branch/src/paramsight/_class_swap.py:54-54
+  If the origin class defines `__reduce_ex__`, the synthetic subclass inherits it and pickle/copy will call that before consulting this `__reduce__`, bypassing `_synth_reduce`. In that case class-swap instances are reconstructed according to the origin's reducer, usually as the origin class without `_paramsight_alias`, so subsequent `@takes_alias`/`TypeVarValue` lookups lose the parametrization despite the strategy claiming copy/pickle survival.
+
+- [P2] Honor new-args during reconstruction — /home/g/wt/paramsight/active/review-branch/src/paramsight/_class_swap.py:73-73
+  For a class-swap class whose `__new__` requires arguments, unpickling or copying reaches `_synth_new` and calls `origin.__new__(origin)` with no args, even if the class implements `__getnewargs__`/`__getnewargs_ex__` and is otherwise picklable. This raises `TypeError` and breaks the advertised copy/pickle preservation for slotted immutable or factory-style classes.
+=== codex exit: 0 ===

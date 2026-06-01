@@ -1,0 +1,22 @@
+Context: this is "paramsight", a library that resolves TypeVar VALUES at runtime
+for generic classes — both PEP 695 (`class C[T]`) and old-style `Generic[T]`.
+Key machinery:
+- `TypeVarValue` / `TypeVarValueOption`: descriptors that, when accessed on a
+  parametrized class/alias (e.g. `Box[int].value_type`), return the concrete
+  type bound to a typevar (or None / NoDefault when unresolved).
+- `@takes_alias`: makes a classmethod receive the generic ALIAS as `cls`
+  (e.g. `Box[int]`) instead of the bare origin, so typevars can be resolved.
+- A generic-alias proxy (`_GAProxy`) that patches `__class_getitem__` and
+  `__init_subclass__` on owner classes to route attribute access through the
+  alias and re-install itself on subclasses.
+- Slotted-class strategies (class_swap / side_table / add_field) for storing
+  `__orig_class__` on instances that have `__slots__` (attrs, dataclass slots).
+- Core resolution lives in `_paramsight.py` (`get_args_at_base`,
+  `get_typevar_value`, typevar tracing through MRO / `__orig_bases__`).
+
+Please focus on: correctness bugs, typevar-resolution edge cases (nested
+typevars, defaults, unions, variadics, old-style vs PEP 695), MRO / metaclass /
+`__init_subclass__` interactions, descriptor protocol mistakes, and regressions
+or behavior that silently returns the wrong type. Be concrete: cite file:line
+and give a minimal repro or reasoning for each finding. Prefer a few
+high-confidence findings over speculative ones.
