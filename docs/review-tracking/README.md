@@ -1,7 +1,13 @@
 # Code-review tracking
 
-This directory tracks an external code-review pass (run with `codex review`) over
+This directory tracks external code-review passes (run with `codex review`) over
 the recent paramsight work, and what we did with each finding.
+
+Two passes are recorded:
+- The original review of the code-review branch — see [`validated-issues.md`](validated-issues.md)
+  (V1–V7) and [`rejected-suggestions.md`](rejected-suggestions.md) (R1).
+- The review of the `variadic_substitution` merge — see
+  [`merge-review-findings.md`](merge-review-findings.md) (MV-1–MV-5).
 
 ## Process
 
