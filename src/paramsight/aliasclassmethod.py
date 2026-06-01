@@ -90,7 +90,15 @@ def _make_patched_init_subclass(owner):
         if is_creating_synth():
             return
         if owner_defines_hook:
-            _orig_init_subclass.__get__(None, cls)(*a, **kw)
+            # Normally an (implicit) classmethod, but a class dict may also hold
+            # a non-descriptor callable (e.g. a decorator that returns a callable
+            # instance). Bind through the descriptor protocol when present; else
+            # call it directly, mirroring native class creation -- which invokes
+            # a non-descriptor ``__init_subclass__`` unbound rather than raising.
+            if hasattr(_orig_init_subclass, "__get__"):
+                _orig_init_subclass.__get__(None, cls)(*a, **kw)
+            else:
+                _orig_init_subclass(*a, **kw)
         else:
             super(owner, cls).__init_subclass__(*a, **kw)
         _install_ga_proxy(cls)

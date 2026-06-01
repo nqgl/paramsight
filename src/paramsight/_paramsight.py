@@ -64,6 +64,21 @@ def _substitute_typevars(value: Any, subs: dict[TypeVar, Any]) -> Any:
             return _NODEFAULT
         return reduce(operator.or_, new_args)
 
+    # Annotated -- ``Annotated[X, *meta]`` reports its *underlying type* ``X`` as
+    # ``typing.get_origin`` (a class), so the non-class special-form branch below
+    # misses it; and ``copy_with`` would keep ``__metadata__`` verbatim anyway.
+    # Substitute the underlying type *and* each metadata element -- a metadata
+    # item may itself reference a typevar (``class M[T](B[Annotated[int, T]])``) --
+    # then rebuild. ``__metadata__`` uniquely identifies an ``Annotated`` alias.
+    if hasattr(value, "__metadata__"):
+        base = value.__origin__
+        meta = value.__metadata__
+        new_base = _substitute_typevars(base, subs)
+        new_meta = tuple(_substitute_typevars(m, subs) for m in meta)
+        if new_base == base and new_meta == meta:
+            return value
+        return typing.Annotated[(new_base, *new_meta)]
+
     # Callable -- its args are ``([param, ...], ret)`` (or ``(Ellipsis, ret)`` /
     # ``(ParamSpec, ret)``). The nested parameter list defeats both a flat walk
     # and ``__class_getitem__``, so rebuild ``Callable[[params], ret]`` explicitly.
@@ -123,12 +138,19 @@ def _build_subs(
         if i < len(args):
             # Resolve the arg against the bindings accumulated so far. Usually a
             # no-op, but a PEP 696 default that Python auto-filled into
-            # ``__args__`` arrives as the *raw, unsubstituted* typevar -- ``C[int]``
-            # on ``class C[T, U = T]`` yields args ``(int, T)`` -- and that ``T``
-            # must resolve to ``int``. (Params are walked in declaration order and
-            # PEP 696 only lets a default reference *earlier* params, so the
-            # referenced binding is always already present.)
-            subs[p] = _substitute_typevars(args[i], subs)
+            # ``__args__`` arrives raw and unnormalized -- either as the
+            # *unsubstituted* typevar (``class C[T, U = T]`` -> ``C[int].__args__
+            # == (int, T)``, so ``T`` must resolve to ``int``) or as a raw value
+            # default (``U = None`` -> ``(int, None)``; ``U = "Foo"`` -> ``(int,
+            # "Foo")``). Explicit args are already normalized by subscription, but
+            # auto-filled ones are not -- so coerce first, exactly like the
+            # default branch below, so ``C[int]`` and ``C[int, <default>]`` agree
+            # (``None`` -> ``NoneType``, ``"Foo"`` -> ``ForwardRef``).
+            # ``coerce_to_type_form`` is a no-op on types/aliases/typevars, so the
+            # ``U = T`` case still resolves. (Params are walked in declaration
+            # order and PEP 696 only lets a default reference *earlier* params, so
+            # the referenced binding is always already present.)
+            subs[p] = _substitute_typevars(coerce_to_type_form(args[i]), subs)
             continue
         default = _get_typevar_default(p)
         if default is not _NODEFAULT:

@@ -472,6 +472,27 @@ class SwapBox[T]:
         return get_args_at_base(cls, SwapBox)
 
 
+@uses_class_swap
+class SwapPair[T]:
+    # A class_swap class whose ``__new__`` *requires* arguments, exposed for
+    # reconstruction via ``__getnewargs__``. Module-level so pickle can find it.
+    __slots__ = ("a", "b")
+
+    def __new__(cls, a, b):
+        return object.__new__(cls)
+
+    def __init__(self, a, b):
+        self.a, self.b = a, b
+
+    def __getnewargs__(self):
+        return (self.a, self.b)
+
+    @takes_alias
+    @classmethod
+    def get_type(cls):
+        return get_args_at_base(cls, SwapPair)
+
+
 def test_class_swap_resolves_on_class_and_instance():
     assert SwapBox[int].get_type() == (int,)
     assert SwapBox[int](x=1).get_type() == (int,)
@@ -506,6 +527,23 @@ def test_class_swap_survives_evolve_copy_deepcopy_pickle():
     assert revived.get_type() == (int,)
     assert revived.x == 1
     assert isinstance(revived, SwapBox)
+
+
+def test_class_swap_copy_pickle_with_arg_taking_new():
+    # Regression: copy/pickle reconstruction used ``origin.__new__(origin)`` with
+    # no args, ignoring ``__getnewargs__`` / an arg-requiring ``__new__`` -- so
+    # these raised ``TypeError`` despite class_swap advertising copy/pickle
+    # survival. They must now round-trip, preserving parametrization and state.
+    inst = SwapPair[int](1, 2)
+    assert inst.get_type() == (int,)
+    for revived in (
+        copy.copy(inst),
+        copy.deepcopy(inst),
+        pickle.loads(pickle.dumps(inst)),
+    ):
+        assert revived.get_type() == (int,)
+        assert (revived.a, revived.b) == (1, 2)
+        assert isinstance(revived, SwapPair)
 
 
 def test_class_swap_on_dataclass_slots_and_manual_slots():

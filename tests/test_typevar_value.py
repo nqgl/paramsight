@@ -644,3 +644,95 @@ def test_user_init_subclass_own_hook_calls_super():
     class C(S[int]): ...
 
     assert order == ["Base:C", "S:C"]
+
+
+def test_non_descriptor_init_subclass_hook_invoked():
+    # A non-descriptor callable used as ``__init_subclass__`` must be invoked the
+    # way native class creation invokes it (unbound), not raise ``AttributeError``
+    # while trying to bind it via the descriptor protocol.
+    class Hook:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, **kw) -> None:  # native invokes non-descriptors unbound
+            self.calls += 1
+
+    h = Hook()
+
+    class S[T]:
+        Type = TypeVarValue[T]()
+        __init_subclass__ = h  # type: ignore[assignment]  # a callable, not a descriptor
+
+    class C(S[int]): ...  # must not raise AttributeError
+
+    assert h.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# PEP 696 value defaults must be coerced consistently
+# ---------------------------------------------------------------------------
+
+
+def test_pep696_value_default_coerced_in_partial_specialization():
+    # When Python auto-fills a later PEP 696 value default into ``__args__`` for a
+    # partial specialization (``C[int].__args__ == (int, None)``), the raw default
+    # must be coerced just like the bare-default path, so ``C[int]`` and the bare
+    # class agree. Regression: the positional branch left ``None`` / ``"Foo"``
+    # raw, so ``TypeVarValue`` returned a bare ``None`` and ``TypeVarValueOption``
+    # read a real ``NoneType`` default as "unresolved".
+    class C[T, U = None]:
+        Ut = TypeVarValue[U]()
+        Uo = TypeVarValueOption[U]()
+
+    assert C[int].Ut is NoneType
+    assert C[int].Uo is NoneType  # a resolved NoneType default, not None/"unresolved"
+
+    class D[T, U = "Foo"]:  # noqa: F821  # string default -> ForwardRef
+        Ud = TypeVarValue[U]()
+
+    assert D[int].Ud == ForwardRef("Foo")
+
+    # The ``U = T`` auto-fill (a typevar, not a value) must still resolve.
+    class E[T, U = T]:
+        Ue = TypeVarValue[U]()
+
+    assert E[int].Ue is int
+
+
+# ---------------------------------------------------------------------------
+# Annotated metadata that references a typevar must be substituted
+# ---------------------------------------------------------------------------
+
+
+def test_annotated_metadata_typevar_is_substituted():
+    # Regression: substitution only touched the underlying type, leaving a stale
+    # typevar in ``Annotated.__metadata__`` (so even a full specialization raised).
+    class B[X]:
+        val = TypeVarValue[X]()
+
+    class M[T](B[Annotated[int, T]]):
+        pass
+
+    assert M[str].val == Annotated[int, str]
+
+    # underlying type itself carrying a typevar is handled too
+    class N[T](B[Annotated[list[T], "m"]]):
+        pass
+
+    assert N[int].val == Annotated[list[int], "m"]
+
+
+# ---------------------------------------------------------------------------
+# PEP 561 marker
+# ---------------------------------------------------------------------------
+
+
+def test_py_typed_marker_is_packaged():
+    # The ``Typing :: Typed`` classifier requires a ``py.typed`` marker beside the
+    # package so PEP 561 type checkers treat installs as typed.
+    import os
+
+    import paramsight
+
+    marker = os.path.join(os.path.dirname(paramsight.__file__), "py.typed")
+    assert os.path.isfile(marker)

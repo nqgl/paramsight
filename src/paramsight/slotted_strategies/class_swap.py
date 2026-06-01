@@ -67,22 +67,37 @@ def get_synth(alias) -> type:
     return _get_or_make(alias.__origin__, alias.__args__)
 
 
-def _synth_new(origin: type, args: tuple):
-    # origin.__new__(origin) is valid for an arbitrary class at runtime;
+def _synth_new(origin: type, args: tuple, newargs: tuple = (), newkwargs=None):
+    # Honor a custom / argument-taking ``__new__`` (captured via
+    # ``__getnewargs_ex__`` / ``__getnewargs__`` in ``_synth_reduce``) so classes
+    # that need construction arguments still round-trip through copy/pickle.
+    # ``origin.__new__(origin, ...)`` is valid for an arbitrary class at runtime;
     # typeshed's __new__ overloads can't express it.
-    obj = origin.__new__(origin)  # pyright: ignore[reportCallIssue]
+    obj = origin.__new__(origin, *newargs, **(newkwargs or {}))  # pyright: ignore[reportCallIssue]
     object.__setattr__(obj, "__class__", _get_or_make(origin, args))
     return obj
 
 
 def _synth_reduce(self):
-    # 3-tuple ``(callable, args, state)``: pickle calls ``_synth_new`` then
-    # applies ``state`` via the instance's normal ``__setstate__`` (or the
-    # default slotted-state handling) -- so we don't reimplement state I/O.
+    # 4-arg ``(callable, args, state)``: pickle calls ``_synth_new`` then applies
+    # ``state`` via the instance's normal ``__setstate__`` (or the default
+    # slotted-state handling) -- so we don't reimplement state I/O. Forward any
+    # ``__getnewargs_ex__`` / ``__getnewargs__`` so an arg-taking ``__new__`` is
+    # reconstructed with its required arguments rather than failing on a bare
+    # ``origin.__new__(origin)``.
     alias = type(self)._paramsight_alias
+    newargs: tuple = ()
+    newkwargs = None
+    getnewargs_ex = getattr(self, "__getnewargs_ex__", None)
+    if getnewargs_ex is not None:
+        newargs, newkwargs = getnewargs_ex()
+    else:
+        getnewargs = getattr(self, "__getnewargs__", None)
+        if getnewargs is not None:
+            newargs = getnewargs()
     getstate = getattr(self, "__getstate__", None)
     state = getstate() if getstate is not None else self.__dict__
-    return (_synth_new, (alias.__origin__, alias.__args__), state)
+    return (_synth_new, (alias.__origin__, alias.__args__, newargs, newkwargs), state)
 
 
 def uses_class_swap(cls: type) -> type:
