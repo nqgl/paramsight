@@ -57,6 +57,16 @@ def test_generic_alias_argument():
     assert Box[dict[str, int]].value_type == dict[str, int]
 
 
+def test_alias_proxy_reports_own_class_not_a_type():
+    # Regression: the proxy must report its own ``__class__`` rather than delegate
+    # to the origin's metaclass. Delegating made ``isinstance(proxy, type)`` true,
+    # so ``typing._type_repr`` (union repr) treated it as a class and dropped the
+    # args (``Box`` instead of ``Box[int]``).
+    assert not isinstance(Box[int], type)
+    assert Box[int].__class__ is not type
+    assert "Box[int]" in repr(int | Box[int])
+
+
 # ---------------------------------------------------------------------------
 # Instance access
 # ---------------------------------------------------------------------------

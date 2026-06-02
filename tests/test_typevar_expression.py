@@ -46,11 +46,14 @@ class Holder[T]:
 
 
 def test_self_resolves_to_receiver_alias():
-    members = get_args(Holder[int].me)
+    holder = Holder[int].me
+    members = get_args(holder)
     assert members[0] is int
     # ``Self`` -> ``Holder[int]`` (a paramsight alias proxy carrying the args).
     assert get_origin(members[1]) is Holder
     assert get_args(members[1]) == (int,)
+    # The alias proxy reprs with its args inside the union (not bare ``Holder``).
+    assert "Holder[int]" in repr(holder)
 
 
 class HolderSub[U](Holder[U]): ...
