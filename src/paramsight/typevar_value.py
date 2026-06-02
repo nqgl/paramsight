@@ -131,13 +131,17 @@ class _TypeVarValueBase:
                 f"{owner.__name__}.{self._name}: {kind}'s type argument must be "
                 f"a TypeVar, got {arg!r}"
             )
-        # Best-effort: for PEP 695 generics the typevars are visible already;
-        # for old-style ``Generic[T]`` classes ``__parameters__`` isn't set
-        # until ``__init_subclass__`` runs (after ``__set_name__``), so an empty
-        # result here just means "check later" -- ``get_typevar_value`` will
-        # raise at access time if the typevar genuinely isn't the owner's.
+        # Trust the param list only when it's the reliable PEP 695
+        # ``__type_params__``. For an old-style ``Generic`` class
+        # ``__parameters__`` isn't set to the class's own until
+        # ``__init_subclass__`` runs (after ``__set_name__``) -- a *direct*
+        # ``Generic[T]`` shows empty, but a *subclass* like
+        # ``class Child(Base[U], Generic[U])`` transiently exposes the base's
+        # inherited params, so validating then would reject ``Child``'s own
+        # ``U``. Defer to access time in those cases (``get_typevar_value`` raises
+        # if the typevar genuinely isn't the owner's).
         params = list(get_parameters(owner))
-        if params and arg not in params:
+        if owner.__type_params__ and arg not in params:
             raise TypeError(
                 f"{owner.__name__}.{self._name}: {arg!r} is not a typevar of "
                 f"{owner.__name__}; its typevars are {params}"
@@ -285,10 +289,14 @@ class _TypeVarExpressionBase(_TypeVarValueBase):
         # The argument is an arbitrary type expression. Restrict it to the owner's
         # own type parameters -- those are the only ones we can resolve from the
         # receiver. (``Self`` is allowed and resolved separately; it isn't a
-        # typevar, so ``_collect_typevars`` ignores it.)
+        # typevar, so ``_collect_typevars`` ignores it.) Only validate eagerly when
+        # the params are the reliable PEP 695 ``__type_params__``; during
+        # ``__set_name__`` an old-style ``Generic`` subclass can transiently expose
+        # its base's inherited params, so defer to access time then (a genuinely
+        # foreign typevar still surfaces as unresolved there).
         kind = type(self).__name__
-        params = list(get_parameters(owner))
-        if params:
+        if owner.__type_params__:
+            params = list(get_parameters(owner))
             foreign = [tv for tv in _collect_typevars(arg) if tv not in params]
             if foreign:
                 raise TypeError(

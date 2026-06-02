@@ -2,7 +2,7 @@
 descriptors -- resolving a whole type expression over a class's typevars.
 """
 
-from typing import Self, TypeVar, assert_type, get_args, get_origin
+from typing import Generic, Self, TypeVar, assert_type, get_args, get_origin
 
 import pytest
 
@@ -103,6 +103,23 @@ class EChild[Y](EBase[Y]): ...
 
 def test_expression_through_inheritance():
     assert EChild[int].e == list[int] | None
+
+
+_OldT = TypeVar("_OldT")
+_OldU = TypeVar("_OldU")
+
+
+class _OldBase(Generic[_OldT]): ...
+
+
+class _OldChild(_OldBase[_OldU], Generic[_OldU]):
+    # Old-style ``Generic`` subclass: the foreign-typevar validation must defer,
+    # since at ``__set_name__`` ``_OldChild`` transiently shows its base's params.
+    e = TypeVarExpression[tuple[_OldU, _OldU]]()
+
+
+def test_old_style_generic_subclass_defers_validation():
+    assert _OldChild[int].e == tuple[int, int]
 
 
 # ---------------------------------------------------------------------------

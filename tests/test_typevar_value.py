@@ -660,6 +660,23 @@ def test_old_style_generic():
     assert OldStyle[str].value_type is str
 
 
+_OldU = TypeVar("_OldU")
+
+
+class _OldBase(Generic[_OldT]): ...
+
+
+class _OldChild(_OldBase[_OldU], Generic[_OldU]):
+    # Old-style ``Generic`` *subclass*: at ``__set_name__`` the class transiently
+    # exposes its base's inherited params, so eager "is it my typevar" validation
+    # must be deferred -- else ``_OldU`` is wrongly rejected as foreign.
+    value_type = TypeVarValue[_OldU]()
+
+
+def test_old_style_generic_subclass_defers_validation():
+    assert _OldChild[int].value_type is int
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models (need the descriptor in ignored_types)
 # ---------------------------------------------------------------------------
