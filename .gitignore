@@ -8,3 +8,6 @@ __pycache__/
 tests/tests/
 .vscode/
 
+# Raw codex review transcripts (kept locally for reference, not tracked)
+docs/review-tracking/raw/
+
