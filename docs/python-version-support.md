@@ -48,6 +48,8 @@ The fix for each is "import from a compat shim instead of `typing`/`types`."
 | `typing.TypeVarTuple` (PEP 646) | 3.11 | variadic binding / substitution | `typing_extensions.TypeVarTuple` |
 | `typing.Unpack` | 3.11 | `_is_unpack` | `typing_extensions.Unpack` |
 | `typing.ParamSpec` (PEP 612) | 3.10 | ParamSpec handling | `typing_extensions.ParamSpec` |
+| `typing.TypeAliasType` (PEP 695 `type` statement) | 3.12 | TypeAliasType rebuild in `_substitute_typevars` | `typing_extensions.TypeAliasType` (but the `type` *syntax* is a 3.12 parser floor anyway) |
+| `types.GenericAlias.__iter__` (the `*alias` re-star trick) | 3.11 | `_restarred_unbounded_unpack` rebuilds an unbounded `*tuple[X, ...]` unpacked | none; below 3.11 rebuild via `typing_extensions.Unpack[...]` instead |
 | `types.UnionType` (`X | Y`) | 3.10 | union substitution in `_substitute_typevars` | none needed at 3.10+; below that, use `typing.Union` exclusively |
 
 ## Footguns (same API, different behavior — the dangerous ones)

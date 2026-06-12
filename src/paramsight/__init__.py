@@ -5,7 +5,14 @@ from paramsight._paramsight import (
     get_typevar_value,
 )
 from paramsight.aliasclassmethod import takes_alias
-from paramsight.typevar_value import TypeVarValue, TypeVarValueOption
+from paramsight.typevar_value import (
+    ParamSpecValue,
+    ParamSpecValueOption,
+    TypeVarTupleValue,
+    TypeVarTupleValueOption,
+    TypeVarValue,
+    TypeVarValueOption,
+)
 
 # The slotted-class opt-ins (add_field / uses_side_table / uses_class_swap)
 # live under the ``paramsight.slotted_strategies`` namespace rather than the
@@ -17,5 +24,9 @@ __all__ = [
     "get_typevar_value",
     "TypeVarValue",
     "TypeVarValueOption",
+    "TypeVarTupleValue",
+    "TypeVarTupleValueOption",
+    "ParamSpecValue",
+    "ParamSpecValueOption",
     "slotted_strategies",
 ]

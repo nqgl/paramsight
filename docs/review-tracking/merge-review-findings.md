@@ -79,3 +79,38 @@ Status legend: 🟢 fixed
 - **Fix:** when the tail is `...` and the prefix is non-empty, rebuild
   `Concatenate[*prefix, ...]` (a valid parameter spec); only a prefix-less tail
   collapses to a bare `...`.
+
+---
+
+## Second pass (branch vs dev): MV-6 .. MV-10
+
+A later combined pass — `codex review --base dev` (raw: `raw/M3-base-dev.log`)
+plus an independent manual read of the full diff — found **5 more confirmed
+issues**, all in the variadic machinery in `_paramsight.py`, all reproduced
+before fixing and all fixed with regression tests in `tests/test_typevar_value.py`.
+
+| ID | Sev | Source | Summary | Status |
+|----|-----|--------|---------|--------|
+| MV-6 | medium (**silent**) | manual | Forwarded unresolved `*Us` mis-anchors the prefix/absorbed/suffix split: `class Child[*Us](Base3[int, *Us])` on `Base3[T, *Ts, U]` reported `Ts = ()` (resolved-empty) instead of unresolved | 🟢 fixed |
+| MV-7 | low | manual | Nested unpack inside a fixed unpacked tuple not flattened: `B[tuple[*tuple[int, *Ts]]]` left a bound `Unpack[Ts]` unsubstituted (false "unresolved") | 🟢 fixed |
+| MV-8 | medium | codex P2 | ParamSpec list forwarded through a generic alias (`C[[T]]` stores `(T,)` in `__args__`) treated as opaque — `D[str]` kept raw `T` | 🟢 fixed |
+| MV-9 | low | codex P3 | `V[Unpack[tuple[int, ...]]]` read unresolved while the equivalent `V[*tuple[int, ...]]` resolved; spellings now normalize to the star form | 🟢 fixed |
+| MV-10 | medium (**silent**) | manual | Substitution inside an unbounded unpack dropped the star: `B[tuple[int, *tuple[T, ...], str]]` with `T=bool` gave the nested `tuple[int, tuple[bool, ...], str]` | 🟢 fixed |
+
+Fix notes:
+- MV-6: `_build_subs` now anchors positional binding only up to the first
+  still-unexpanded unpack (and, for suffix params, back to the last); params
+  whose slot an unpack covers bind the unresolved sentinel, never a default.
+- MV-7: `_fixed_tuple_members` (shared core with the TypeVarTuple-default path)
+  routes members through the unpack-aware `_subst_args`.
+- MV-8: `_subst_args` substitutes the members of plain tuple/list args
+  (forwarded ParamSpec parameter lists), keeping the tuple shape.
+- MV-9 + MV-10: `_restarred_unbounded_unpack` substitutes inside an unbounded
+  tuple unpack and rebuilds it *unpacked* (normalized to the `*tuple[...]`
+  spelling). As a consequence an unbounded TypeVarTuple **default** now binds
+  too, matching its explicit-subscription equivalent.
+
+The same pass also landed (not bug fixes): `TypeAliasType` substitution
+support, the variadic descriptor surface (`TypeVarTupleValue` /
+`ParamSpecValue` + `...Option` variants), and documentation of the variadic
+entry shapes returned by `get_args_at_base`.

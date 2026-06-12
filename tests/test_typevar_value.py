@@ -23,6 +23,10 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from paramsight import (
+    ParamSpecValue,
+    ParamSpecValueOption,
+    TypeVarTupleValue,
+    TypeVarTupleValueOption,
     TypeVarValue,
     TypeVarValueOption,
     get_args_at_base,
@@ -344,23 +348,67 @@ def test_annotated_argument_resolves_and_keeps_metadata():
     assert _AnnotatedMid[int].x_type == Annotated[int, "meta"]
 
 
-# A PEP 695 generic ``type`` alias has a non-class origin and no ``copy_with``;
-# paramsight has no rule to rebuild it, so it refuses loudly rather than silently
-# leaking the unsubstituted alias. (Defined at module scope -- ``type`` statements
-# aren't allowed inside a function.)
-type _UnsupportedAlias[X] = list[X]
+# ---------------------------------------------------------------------------
+# PEP 695 ``type`` aliases (TypeAliasType). A parameterized alias has a
+# non-class origin and no ``copy_with``; it is rebuilt by re-subscripting the
+# alias -- keeping the alias rather than expanding ``__value__``. (Defined at
+# module scope -- ``type`` statements aren't allowed inside a function.)
+# ---------------------------------------------------------------------------
+type _PairAlias[X] = tuple[X, X]
+type _PlainAlias = int
 
 
-class _UnsupportedBase[Y]:
+class _AliasValBase[Y]:
     y_type = TypeVarValue[Y]()
+    y_opt = TypeVarValueOption[Y]()
 
 
-class _UnsupportedMid[T](_UnsupportedBase[_UnsupportedAlias[T]]): ...
+class _AliasMid[T](_AliasValBase[_PairAlias[T]]): ...
+
+
+def test_parameterized_type_alias_substitutes():
+    resolved = _AliasMid[int].y_type
+    assert resolved == _PairAlias[int]
+    assert get_origin(resolved) is _PairAlias
+    # nested typevar inside the alias's args resolves too
+    assert _AliasMid[list[int]].y_type == _PairAlias[list[int]]
+
+
+def test_parameterized_type_alias_unresolved_when_bare():
+    # T unbound -> the alias's argument is the unresolved sentinel, so the whole
+    # value is unresolved rather than leaking ``_PairAlias[T]`` or crashing.
+    assert _AliasMid.y_opt is None
+
+
+class _AliasPlainMid(_AliasValBase[_PlainAlias]): ...
+
+
+def test_unparameterized_type_alias_passes_through():
+    # A non-generic alias is an atomic value: kept as the alias itself.
+    assert _AliasPlainMid.y_type is _PlainAlias
 
 
 def test_unsupported_type_form_raises_clearly():
+    # A parameterized form paramsight has no rebuild rule for must be refused
+    # loudly rather than silently mis-resolved. Every real 3.13 typing form now
+    # has a rule, so construct a minimal alias with a non-class origin and no
+    # ``copy_with`` to keep the refusal path exercised.
+    class _NoRebuild(typing._GenericAlias, _root=True):  # type: ignore[attr-defined]  # noqa: SLF001
+        @property
+        def copy_with(self):  # hide the inherited rebuild hook from hasattr
+            raise AttributeError("copy_with")
+
+    class _NotAClassOrigin: ...
+
+    class _RefusalBase[Y]:
+        y_type = TypeVarValue[Y]()
+
+    fake = _NoRebuild(_NotAClassOrigin(), (int,))
+
+    class _RefusalMid[T](_RefusalBase[fake]): ...  # type: ignore[valid-type]
+
     with pytest.raises(TypeError, match="no rule to rebuild"):
-        _UnsupportedMid[int].y_type
+        _RefusalMid[int].y_type
 
 
 # ---------------------------------------------------------------------------
@@ -422,10 +470,15 @@ def test_typevartuple_fixed_default_expands():
 class _UnboundedDefaultVariadic[*Ts = *tuple[int, ...]](_VBase[tuple[*Ts]]): ...
 
 
-def test_typevartuple_unbounded_default_is_unresolved_not_corrupt():
-    # An unbounded ``*tuple[int, ...]`` default can't expand into a fixed run, so
-    # it reads as unresolved rather than producing a malformed nested unpack.
-    assert _UnboundedDefaultVariadic.x_opt is None
+def test_typevartuple_unbounded_default_matches_explicit_subscription():
+    # An unbounded ``*tuple[int, ...]`` default binds as a single re-starred
+    # unpack -- exactly what the matching explicit subscription binds -- so the
+    # default == explicit invariant holds for the unbounded form too.
+    assert _UnboundedDefaultVariadic.x_type == tuple[*tuple[int, ...]]
+    assert (
+        _UnboundedDefaultVariadic.x_type
+        == _UnboundedDefaultVariadic[*tuple[int, ...]].x_type
+    )
 
 
 class _FwdBase[*Ts]: ...
@@ -439,6 +492,69 @@ def test_bare_typevartuple_forwarding_resolves_to_unresolved_sentinel():
     # absorbed run still holds an un-flattened Unpack, so the binding must be the
     # NoDefault sentinel, not a concrete one-element tuple ``((Unpack[Us],),)``.
     assert get_args_at_base(_FwdChild, _FwdBase) == (typing.NoDefault,)
+
+
+# An unresolved ``*Us`` forwarded into a base whose param list has ordinary
+# params around its ``*Ts`` is an arg of unknown LENGTH: the positional split
+# (prefix / absorbed / suffix) can only anchor params that don't count across
+# the unpack. Regression: the count-based split used to mis-anchor, silently
+# reporting ``Ts = ()`` (resolved-empty!) for an unknown run.
+class _SplitBase[T, *Ts, U]: ...
+
+
+# (Runtime-valid subscriptions pyright rejects -- *Us isn't provably long
+# enough for the suffix param -- hence the ignores.)
+class _SplitFwdMid[*Us](_SplitBase[int, *Us]): ...  # type: ignore[valid-type]
+
+
+class _SplitFwdPre[*Us](_SplitBase[*Us, str]): ...  # type: ignore[valid-type]
+
+
+def test_forwarded_unpack_does_not_misanchor_the_split():
+    # ``Base[int, *Us]`` with Us unknown: T anchors from the start; *Ts and U
+    # are covered by the unpack -> unresolved, never a concrete ``()``.
+    assert get_args_at_base(_SplitFwdMid, _SplitBase) == (
+        int,
+        typing.NoDefault,
+        typing.NoDefault,
+    )
+    # ``Base[*Us, str]``: U anchors from the end; T and *Ts are unknowable.
+    assert get_args_at_base(_SplitFwdPre, _SplitBase) == (
+        typing.NoDefault,
+        typing.NoDefault,
+        str,
+    )
+
+
+def test_forwarded_unpack_specialization_still_flattens():
+    # Once *Us is bound the args flatten before the split, so everything binds.
+    assert get_args_at_base(_SplitFwdMid[str, bytes], _SplitBase) == (
+        int,
+        (str,),
+        bytes,
+    )
+    assert get_args_at_base(_SplitFwdPre[int, float], _SplitBase) == (
+        int,
+        (float,),
+        str,
+    )
+
+
+# The same anchoring rule with NO TypeVarTuple in the base: a forwarded unpack
+# covers ordinary params whose value we then can't see -- they must read
+# unresolved, not fall back to a default the subscription overrode.
+class _SplitPlainBase[A, B = bytes]: ...
+
+
+class _SplitPlainFwd[*Us](_SplitPlainBase[*Us]): ...  # type: ignore[valid-type]
+
+
+def test_forwarded_unpack_into_ordinary_params_is_unresolved():
+    assert get_args_at_base(_SplitPlainFwd, _SplitPlainBase) == (
+        typing.NoDefault,
+        typing.NoDefault,  # B's ``= bytes`` default is overridden by *Us
+    )
+    assert get_args_at_base(_SplitPlainFwd[int, str], _SplitPlainBase) == (int, str)
 
 
 class Sentinel: ...  # forward-ref target; paramsight keeps it an unevaluated ref
@@ -493,6 +609,44 @@ def test_typevartuple_explicit_empty_marker_with_ordinary_param():
     # run must not leak as a one-tuple ``((),)`` -> ``tuple[int, ()]``.
     assert _MixedEmpty[int, ()].x_type == tuple[int]
     assert _MixedEmpty[int, str, bytes].x_type == tuple[int, str, bytes]
+
+
+# A *fixed* unpacked tuple may itself contain a nested ``*Ts``; flattening its
+# members must go through the same unpack-aware walk as any other arg sequence.
+class _NestedFixed[*Ts](_VBase[tuple[*tuple[int, *Ts]]]): ...
+
+
+def test_nested_unpack_inside_fixed_unpacked_tuple_flattens():
+    assert _NestedFixed[str].x_type == tuple[int, str]
+    assert _NestedFixed[()].x_type == tuple[int]
+    assert _NestedFixed.x_opt is None  # Ts free -> still unresolved
+
+
+def test_unbounded_tuple_unpack_spellings_agree():
+    # ``*tuple[int, ...]`` and ``Unpack[tuple[int, ...]]`` are the same type; the
+    # runtime objects differ, so resolution must normalize them to one spelling.
+    # Regression: the Unpack spelling read as unresolved while the star spelling
+    # resolved.
+    star = _Variadic[*tuple[int, ...]].x_type
+    unpack = _Variadic[Unpack[tuple[int, ...]]].x_type  # noqa: UP044
+    assert star == tuple[*tuple[int, ...]]
+    assert unpack == star
+    # flattened among ordinary prefix/suffix members too
+    assert (
+        _MiddleVariadic[Unpack[tuple[bool, ...]]].x_type  # noqa: UP044
+        == tuple[int, *tuple[bool, ...], str]
+    )
+
+
+# Substitution *inside* an unbounded unpacked tuple must keep it unpacked: the
+# plain generic rebuild drops the star. Regression: ``A[bool]`` silently gave
+# the nested ``tuple[int, tuple[bool, ...], str]``.
+class _UnboundedInner[T](_VBase[tuple[int, *tuple[T, ...], str]]): ...
+
+
+def test_substitution_inside_unbounded_unpack_preserves_star():
+    assert _UnboundedInner[bool].x_type == tuple[int, *tuple[bool, ...], str]
+    assert _UnboundedInner.x_opt is None  # free T inside the run -> unresolved
 
 
 class _PBase[X]:
@@ -572,6 +726,23 @@ def test_paramspec_list_default_resolves_on_bare_class():
     assert _is_callable_of(_ParamSpecListDefaultBare.x_type, [int], int)
 
 
+# A ParamSpec parameter list forwarded through a generic alias is stored as a
+# plain tuple inside ``__args__`` (``C[[T]]`` -> ``((T,),)``); its members must
+# be substituted with the child's bindings. Regression: the tuple was treated
+# as opaque, so ``D[str]`` kept a raw ``T`` and read as unresolved.
+class _PSFwd[T](_ParamSpecArch[[T]]): ...
+
+
+class _PSFwdNested[T](_ParamSpecArch[[T, list[T]]]): ...
+
+
+def test_paramspec_list_forwarded_through_alias_substitutes():
+    assert _is_callable_of(_PSFwd[str].x_type, [str], int)
+    assert _is_callable_of(_PSFwdNested[int].x_type, [int, list[int]], int)
+    # bare child: T free inside the forwarded list -> unresolved, not a leak
+    assert _PSFwd.x_opt is None
+
+
 class _ConcatEllipsis[**P](_PBase[Callable[Concatenate[int, P], str]]): ...
 
 
@@ -585,6 +756,86 @@ def test_concatenate_prefix_preserved_when_paramspec_is_ellipsis():
     assert ret is str
     assert get_origin(params) is Concatenate
     assert get_args(params) == (int, Ellipsis)
+
+
+# ---------------------------------------------------------------------------
+# Variadic descriptor surface: TypeVarTupleValue / ParamSpecValue (and their
+# Option variants) expose a *Ts / **P binding the way TypeVarValue exposes a
+# TypeVar's -- a plain tuple of types, resp. a Callable-style parameter list.
+# ---------------------------------------------------------------------------
+
+
+class _Dims[*Ts]:
+    dims = TypeVarTupleValue[*Ts]()
+    dims_opt = TypeVarTupleValueOption[*Ts]()
+
+
+def test_typevartuple_value_descriptor():
+    assert _Dims[int, str].dims == (int, str)
+    assert _Dims[()].dims == ()  # explicitly empty: a real binding, not None
+    assert _Dims[int, str]().dims == (int, str)  # instances too
+    assert _Dims[int, str].dims_opt == (int, str)
+
+
+def test_typevartuple_value_descriptor_unresolved():
+    assert _Dims.dims_opt is None
+    with pytest.raises(LookupError, match=r"TypeVarTupleValue\[Ts\]"):
+        _Dims.dims
+
+
+class _DimsChild[*Us](_Dims[int, *Us]): ...
+
+
+def test_typevartuple_value_descriptor_through_inheritance():
+    assert _DimsChild[str].dims == (int, str)
+    assert _DimsChild.dims_opt is None  # *Us free -> the run is unknowable
+
+
+class _Params[**P]:
+    params = ParamSpecValue[P]()
+    params_opt = ParamSpecValueOption[P]()
+
+
+def test_paramspec_value_descriptor():
+    assert _Params[[int, str]].params == [int, str]
+    assert _Params[int].params == [int]  # type: ignore[valid-type]  # PEP 612 shorthand
+    assert _Params[...].params is Ellipsis
+    assert _Params[[int, str]]().params == [int, str]  # instances too
+    assert _Params[[bool]].params_opt == [bool]
+
+
+def test_paramspec_value_descriptor_unresolved():
+    assert _Params.params_opt is None
+    with pytest.raises(LookupError, match=r"ParamSpecValue\[P\]"):
+        _Params.params
+
+
+class _ParamsChild[**Q](_Params[Q]): ...
+
+
+def test_paramspec_value_descriptor_through_inheritance():
+    assert _ParamsChild[[bytes]].params == [bytes]
+    assert _ParamsChild.params_opt is None  # still-symbolic Q -> unresolved
+
+
+def test_variadic_descriptor_validation_errors():
+    # Wrong parameter kind is rejected at class-definition time, same as
+    # TypeVarValue rejecting a non-TypeVar.
+    with pytest.raises(TypeError, match="unpacked TypeVarTuple"):
+
+        class _BadTvt[T]:
+            d = TypeVarTupleValue[T]()  # type: ignore[valid-type]
+
+    with pytest.raises(TypeError, match="must be a ParamSpec"):
+
+        class _BadPs[T]:
+            d = ParamSpecValue[T]()  # type: ignore[valid-type]
+
+    # ...and TypeVarValue still rejects variadics, naming the actual argument.
+    with pytest.raises(TypeError, match=r"must be a TypeVar, got typing.Unpack"):
+
+        class _BadTv[*Ts]:
+            d = TypeVarValue[*Ts]()  # type: ignore[valid-type]
 
 
 # ---------------------------------------------------------------------------

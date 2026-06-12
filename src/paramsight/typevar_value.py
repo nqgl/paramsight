@@ -1,22 +1,30 @@
-"""Property-style descriptors exposing the resolved value of a class's typevar.
+"""Property-style descriptors exposing the resolved value of a class's type
+parameters.
 
-Two surfaces share one resolution engine:
+One resolution engine, one descriptor pair per parameter kind:
 
-- :class:`TypeVarValue` -- statically ``type[T]``. An unresolved typevar with no
-  default is treated as an *error* and raises ``LookupError``.
-- :class:`TypeVarValueOption` -- statically ``type[T] | None``. An unresolved
-  typevar with no default is a *value*: the attribute yields ``None``.
+- :class:`TypeVarValue` / :class:`TypeVarValueOption` -- an ordinary ``TypeVar``;
+  statically ``type[T]`` (resp. ``type[T] | None``).
+- :class:`TypeVarTupleValue` / :class:`TypeVarTupleValueOption` -- a PEP 646
+  ``TypeVarTuple`` (``*Ts``); resolves to a plain tuple of types.
+- :class:`ParamSpecValue` / :class:`ParamSpecValueOption` -- a PEP 612
+  ``ParamSpec`` (``**P``); resolves to a parameter list (``[int, str]``-style
+  list, or ``...``).
 
-Which to reach for: ``TypeVarValue`` when reading the attribute on anything but a
-fully-bound class/specialization is a bug (the common case -- no narrowing tax on
-the happy path). ``TypeVarValueOption`` when "unresolved" is a state you want to
-branch on with the canonical ``if t is None`` idiom.
+In each pair, the plain descriptor treats an unresolved-and-defaultless
+parameter as an *error* and raises ``LookupError``; the ``...Option`` variant
+treats it as a *value* and yields ``None``.
+
+Which to reach for: the plain variant when reading the attribute on anything but
+a fully-bound class/specialization is a bug (the common case -- no narrowing tax
+on the happy path). The ``...Option`` variant when "unresolved" is a state you
+want to branch on with the canonical ``if t is None`` idiom.
 """
 
-from types import UnionType
+from types import EllipsisType, UnionType
 from typing import Any
 
-from paramsight._paramsight import get_args_at_base, get_typevar_value
+from paramsight._paramsight import get_typevar_value
 from paramsight.aliasclassmethod import (
     _install_ga_proxy,
     _raise_slotted_instance_without_storage,
@@ -31,6 +39,8 @@ from paramsight.type_utils import (
     _is_paramspec,
     _is_typevar,
     _is_typevartuple,
+    _is_unpack,
+    _unpack_inner,
     get_args_robust,
     get_parameters,
     is_generic_alias,
@@ -46,44 +56,48 @@ def _is_unresolved(value: Any) -> bool:
     recursion is the point: a top-level ``is NoDefault`` test would wave a nested
     hole through (e.g. a default ``U = list[T]`` read off a class where ``T``
     itself never got bound). A ``Callable``'s parameter list arrives as a plain
-    ``list``, so that is walked too. A free ``*Ts`` / ``**P`` (TypeVarTuple /
-    ParamSpec, e.g. an ``Unpack[Ts]`` whose ``Ts`` never got bound) counts as
-    unresolved as well.
+    ``list``, and a ``TypeVarTuple``/``ParamSpec`` binding as a plain ``tuple``,
+    so those are walked too. A free ``*Ts`` / ``**P`` (TypeVarTuple / ParamSpec,
+    e.g. an ``Unpack[Ts]`` whose ``Ts`` never got bound) counts as unresolved
+    as well.
     """
     if value is _NODEFAULT:
         return True
     if _is_typevar(value) or _is_typevartuple(value) or _is_paramspec(value):
         return True
-    if isinstance(value, list):  # a Callable's ``[params]`` argument
+    if isinstance(value, (list, tuple)):  # Callable ``[params]`` / variadic binding
         return any(_is_unresolved(arg) for arg in value)
     if is_generic_alias(value) or isinstance(value, UnionType):
         return any(_is_unresolved(arg) for arg in get_args_robust(value))
     return False
 
 
-def _raise_unresolved(base: type, name: str, typevar: Any, value: Any) -> None:
+def _raise_unresolved(
+    base: type, name: str, typevar: Any, value: Any, kind: str = "TypeVarValue"
+) -> None:
     tv = getattr(typevar, "__name__", typevar)
     b = base.__name__
     raise LookupError(
-        f"paramsight: ``{b}.{name}`` (TypeVarValue[{tv}]) did not resolve to a "
+        f"paramsight: ``{b}.{name}`` ({kind}[{tv}]) did not resolve to a "
         f"concrete type -- it resolved to {value!r}, which is still unbound. This "
         f"happens when {tv} has no specialization and no usable default, or when "
         f"its default/binding itself references a typevar that never got bound. "
         f"Reach it through a (fuller) specialization (e.g. ``{b}[int].{name}``), "
         f"or give the typevar a PEP 696 default. If 'unresolved' is a state you "
-        f"want to handle rather than an error, swap ``TypeVarValue`` for "
-        f"``TypeVarValueOption``, which yields ``None`` here."
+        f"want to handle rather than an error, swap ``{kind}`` for "
+        f"``{kind}Option``, which yields ``None`` here."
     )
 
 
 class _TypeVarValueBase:
     """Shared resolution engine for the typevar-value descriptors.
 
-    Holds everything except ``__get__`` -- the two concrete descriptors differ
-    only in what they do with an unresolved-and-defaultless typevar (raise vs.
-    yield ``None``), and keeping their ``__get__`` methods as independent
-    siblings (rather than an override pair) avoids a Liskov return-type clash
-    between ``type[T]`` and ``type[T] | None``.
+    Holds everything except ``__get__`` -- the concrete descriptors differ
+    only in which kind of type parameter they accept (``_accept_arg``) and in
+    what they do with an unresolved-and-defaultless one (raise vs. yield
+    ``None``). The ``__get__`` methods are independent siblings (rather than
+    an override chain) to avoid Liskov return-type clashes between surfaces
+    like ``type[T]`` and ``type[T] | None``.
     """
 
     # Tells paramsight's generic-alias attribute proxy (_GAProxy) to hand us the
@@ -91,9 +105,20 @@ class _TypeVarValueBase:
     # origin class. Without this the descriptor would only ever see ``Box``.
     _acm_takes_alias = True
 
+    # Subclass knobs: what kind of type parameter the descriptor takes.
+    _arg_kind_description = "a TypeVar"
+    _example_subscript = "T"
+
     _base: type
     _name: str
     _typevar: Any
+
+    @staticmethod
+    def _accept_arg(arg: Any) -> Any | None:
+        """The type-parameter object when ``arg`` is the kind this descriptor
+        accepts (unwrapping any spelling, e.g. ``*Ts`` -> the TypeVarTuple),
+        else None."""
+        return arg if _is_typevar(arg) else None
 
     def __set_name__(self, owner: type, name: str) -> None:
         kind = type(self).__name__
@@ -101,16 +126,20 @@ class _TypeVarValueBase:
         if orig is None:
             raise TypeError(
                 f"{owner.__name__}.{name}: {kind} must be parameterized "
-                f"with one of {owner.__name__}'s typevars, "
-                f"e.g. `{name} = {kind}[T]()`"
+                f"with one of {owner.__name__}'s type parameters, "
+                f"e.g. `{name} = {kind}[{self._example_subscript}]()`"
             )
-        # Resolve against the concrete descriptor class actually in use, so this
-        # works identically for TypeVarValue and TypeVarValueOption.
-        (typevar,) = get_args_at_base(orig, type(self))
-        if not _is_typevar(typevar):
+        # Read the type argument straight off the subscription. (Resolving it
+        # through ``get_args_at_base`` would lose a variadic's identity: a
+        # symbolic ``*Ts`` arg deliberately binds to the unresolved sentinel,
+        # but here the symbol itself IS the answer.)
+        args = get_args_robust(orig)
+        typevar = self._accept_arg(args[0]) if len(args) == 1 else None
+        if typevar is None:
+            got = args[0] if len(args) == 1 else args
             raise TypeError(
                 f"{owner.__name__}.{name}: {kind}'s type argument must be "
-                f"a TypeVar, got {typevar!r}"
+                f"{self._arg_kind_description}, got {got!r}"
             )
         # Best-effort: for PEP 695 generics the typevars are visible already;
         # for old-style ``Generic[T]`` classes ``__parameters__`` isn't set
@@ -214,7 +243,9 @@ class TypeVarValue[T](_TypeVarValueBase):
     def __get__(self, instance: object | None, owner: type | None = None, /) -> type[T]:
         value = self._resolve_value(instance, owner)
         if _is_unresolved(value):
-            _raise_unresolved(self._base, self._name, self._typevar, value)
+            _raise_unresolved(
+                self._base, self._name, self._typevar, value, type(self).__name__
+            )
         return value
 
 
@@ -254,3 +285,132 @@ class TypeVarValueOption[T](_TypeVarValueBase):
         if _is_unresolved(value):
             return None
         return value
+
+
+class _TypeVarTupleValueBase(_TypeVarValueBase):
+    """Validation shared by the ``TypeVarTuple`` descriptors: the subscription
+    must be a single unpacked TypeVarTuple (``Kind[*Ts]``)."""
+
+    _arg_kind_description = "an unpacked TypeVarTuple (`*Ts`)"
+    _example_subscript = "*Ts"
+
+    @staticmethod
+    def _accept_arg(arg: Any) -> Any | None:
+        if _is_unpack(arg):
+            inner = _unpack_inner(arg)
+            if _is_typevartuple(inner):
+                return inner
+        return None
+
+
+class TypeVarTupleValue[*Ts](_TypeVarTupleValueBase):
+    """Descriptor resolving the value of the owning class's ``TypeVarTuple``.
+
+    Define it on a variadic generic class, parameterized with that class's own
+    ``*Ts``::
+
+        class Shape[*Ts]:
+            dims = TypeVarTupleValue[*Ts]()
+
+        Shape[int, str].dims              # (int, str) -- a plain tuple of types
+        Shape[()].dims                    # ()  (explicitly empty)
+        Shape[*tuple[int, ...]].dims      # (*tuple[int, ...],)  (unbounded run)
+
+    The runtime value is a plain Python tuple with one entry per absorbed type
+    (the same shape :func:`paramsight.get_args_at_base` reports for a
+    ``TypeVarTuple`` parameter). The static return type is ``tuple[Any, ...]``
+    -- Python's type system has no way to map ``*Ts`` onto a tuple of ``type``
+    objects. Reading the attribute where ``*Ts`` is unbound (a bare,
+    unsubscripted class with no usable default) raises ``LookupError``; see
+    :class:`TypeVarTupleValueOption` for the ``None``-yielding variant.
+    """
+
+    def __get__(
+        self, instance: object | None, owner: type | None = None, /
+    ) -> tuple[Any, ...]:
+        value = self._resolve_value(instance, owner)
+        if _is_unresolved(value):
+            _raise_unresolved(
+                self._base, self._name, self._typevar, value, type(self).__name__
+            )
+        return value
+
+
+class TypeVarTupleValueOption[*Ts](_TypeVarTupleValueBase):
+    """Like :class:`TypeVarTupleValue`, but an unresolved ``*Ts`` yields
+    ``None`` instead of raising. The empty binding is unambiguous: an
+    explicitly empty ``*Ts`` (``Shape[()]``) resolves to ``()``, never
+    ``None``, so ``None`` means exactly "no binding to resolve"."""
+
+    def __get__(
+        self, instance: object | None, owner: type | None = None, /
+    ) -> tuple[Any, ...] | None:
+        value = self._resolve_value(instance, owner)
+        if _is_unresolved(value):
+            return None
+        return value
+
+
+class _ParamSpecValueBase(_TypeVarValueBase):
+    """Validation shared by the ``ParamSpec`` descriptors: the subscription
+    must be a single ParamSpec (``Kind[P]``)."""
+
+    _arg_kind_description = "a ParamSpec"
+    _example_subscript = "P"
+
+    @staticmethod
+    def _accept_arg(arg: Any) -> Any | None:
+        return arg if _is_paramspec(arg) else None
+
+    @staticmethod
+    def _as_parameter_list(value: Any) -> list[Any] | EllipsisType:
+        # A bound ParamSpec is a tuple of parameter types; render it in the
+        # ``[p, ...]`` list form ``Callable`` uses. ``...`` stays itself.
+        return list(value) if isinstance(value, tuple) else value
+
+
+class ParamSpecValue[**P](_ParamSpecValueBase):
+    """Descriptor resolving the value of the owning class's ``ParamSpec``.
+
+    Define it on a ParamSpec'd generic class, parameterized with that class's
+    own ``**P``::
+
+        class Handler[**P]:
+            params = ParamSpecValue[P]()
+
+        Handler[[int, str]].params        # [int, str] -- the parameter list
+        Handler[int].params               # [int]  (PEP 612 shorthand)
+        Handler[...].params               # Ellipsis
+
+    A bound parameter list is returned as a plain Python list (the same shape
+    ``Callable[[...], R]`` reports via ``typing.get_args``); a ``...`` binding
+    is returned as ``Ellipsis`` itself. Reading the attribute where ``**P`` is
+    unbound (a bare, unsubscripted class with no usable default) raises
+    ``LookupError``; see :class:`ParamSpecValueOption` for the
+    ``None``-yielding variant.
+    """
+
+    def __get__(
+        self, instance: object | None, owner: type | None = None, /
+    ) -> list[Any] | EllipsisType:
+        value = self._resolve_value(instance, owner)
+        if _is_unresolved(value):
+            _raise_unresolved(
+                self._base, self._name, self._typevar, value, type(self).__name__
+            )
+        return self._as_parameter_list(value)
+
+
+class ParamSpecValueOption[**P](_ParamSpecValueBase):
+    """Like :class:`ParamSpecValue`, but an unresolved ``**P`` yields ``None``
+    instead of raising. The ``...`` binding is unambiguous: a ParamSpec bound
+    to ellipsis resolves to ``Ellipsis`` (a truthy singleton distinct from
+    ``None``), so ``None`` means exactly "no binding to resolve"."""
+
+    def __get__(
+        self, instance: object | None, owner: type | None = None, /
+    ) -> list[Any] | EllipsisType | None:
+        value = self._resolve_value(instance, owner)
+        if _is_unresolved(value):
+            return None
+        return self._as_parameter_list(value)
