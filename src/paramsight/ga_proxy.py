@@ -11,6 +11,13 @@ from paramsight.slotted_strategies import (
 )
 
 _generic_alias_fields = [
+    # ``__class__`` must report the proxy's *own* type, not be delegated to the
+    # origin. Delegating returns the origin's metaclass (``type``), which makes
+    # ``isinstance(proxy, type)`` true -- so ``typing._type_repr`` (used by union
+    # repr) treats the proxy as a class and prints it without its args
+    # (``Box`` instead of ``Box[int]``). A normal generic alias reports its own
+    # type here; the proxy must too.
+    "__class__",
     "_inst",
     "_name",
     "__origin__",

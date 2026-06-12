@@ -62,6 +62,16 @@ def test_generic_alias_argument():
     assert Box[dict[str, int]].value_type == dict[str, int]
 
 
+def test_alias_proxy_reports_own_class_not_a_type():
+    # Regression: the proxy must report its own ``__class__`` rather than delegate
+    # to the origin's metaclass. Delegating made ``isinstance(proxy, type)`` true,
+    # so ``typing._type_repr`` (union repr) treated it as a class and dropped the
+    # args (``Box`` instead of ``Box[int]``).
+    assert not isinstance(Box[int], type)
+    assert Box[int].__class__ is not type
+    assert "Box[int]" in repr(int | Box[int])
+
+
 # ---------------------------------------------------------------------------
 # Instance access
 # ---------------------------------------------------------------------------
@@ -955,6 +965,23 @@ class OldStyle(Generic[_OldT]):
 def test_old_style_generic():
     assert OldStyle[int].value_type is int
     assert OldStyle[str].value_type is str
+
+
+_OldU = TypeVar("_OldU")
+
+
+class _OldBase(Generic[_OldT]): ...
+
+
+class _OldChild(_OldBase[_OldU], Generic[_OldU]):
+    # Old-style ``Generic`` *subclass*: at ``__set_name__`` the class transiently
+    # exposes its base's inherited params, so eager "is it my typevar" validation
+    # must be deferred -- else ``_OldU`` is wrongly rejected as foreign.
+    value_type = TypeVarValue[_OldU]()
+
+
+def test_old_style_generic_subclass_defers_validation():
+    assert _OldChild[int].value_type is int
 
 
 # ---------------------------------------------------------------------------

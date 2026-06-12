@@ -8,6 +8,8 @@ from paramsight.aliasclassmethod import takes_alias
 from paramsight.typevar_value import (
     ParamSpecValue,
     ParamSpecValueOption,
+    TypeVarExpression,
+    TypeVarExpressionOption,
     TypeVarTupleValue,
     TypeVarTupleValueOption,
     TypeVarValue,
@@ -28,5 +30,7 @@ __all__ = [
     "TypeVarTupleValueOption",
     "ParamSpecValue",
     "ParamSpecValueOption",
+    "TypeVarExpression",
+    "TypeVarExpressionOption",
     "slotted_strategies",
 ]
