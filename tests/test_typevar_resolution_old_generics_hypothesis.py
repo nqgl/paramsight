@@ -10,8 +10,15 @@ from pydantic import BaseModel
 from paramsight._paramsight import get_args_at_base
 from paramsight.aliasclassmethod import takes_alias
 
-# torch is an optional compat target; skip this module if it isn't installed.
-nn = pytest.importorskip("torch.nn")
+# torch is an optional compat target: only the nn.Module fixtures/tests skip
+# when it's missing -- the rest of the module (notably the patch_super
+# coverage) must run everywhere.
+try:
+    import torch.nn as nn
+except ImportError:
+    nn = None
+
+requires_torch = pytest.mark.skipif(nn is None, reason="torch is not installed")
 
 # ---------------------------------------------------------------------------
 # Hypothesis configuration
@@ -59,6 +66,11 @@ def test_instance_paths_match_classmethod_behavior(t: type):
     # attrs + CheckTVCls
     assert CheckAttrs[t]().check() == (t,)
 
+
+@requires_torch
+@DEFAULT_SETTINGS
+@given(t=TYPE_STRAT)
+def test_instance_path_torch(t: type):
     # nn.Module + CheckTVCls (has no required __init__ args)
     assert CheckTorch[t]().check() == (t,)
 
@@ -139,7 +151,9 @@ class CheckAttrs(CheckTVCls[T], Generic[T]):
     _paramsight_slots = "side_table"
 
 
-class CheckTorch(nn.Module, CheckTVCls[T], Generic[T]): ...
+if nn is not None:
+
+    class CheckTorch(nn.Module, CheckTVCls[T], Generic[T]): ...
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +194,12 @@ def test_basemodel_and_mixins_classmethod_paths(t: type):
     assert CheckBaseModel[t].check() == (t,)
     assert CheckBaseModel2[t].check() == (t,)
     assert CheckAttrs[t].check() == (t,)
+
+
+@requires_torch
+@DEFAULT_SETTINGS
+@given(t=TYPE_STRAT)
+def test_torch_classmethod_path(t: type):
     assert CheckTorch[t].check() == (t,)
 
 
@@ -201,8 +221,9 @@ def test_unspecialized_returns_nodefault_tuples_for_all_relevant_classes():
         CheckPlainSuperDuper_1,
         CheckPlainSuperDuper_2,
         CheckAttrs,
-        CheckTorch,
     ]
+    if nn is not None:
+        candidates.append(CheckTorch)
     for cls in candidates:
         assert cls.check() == (typing.NoDefault,)
 
