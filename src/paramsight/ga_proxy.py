@@ -89,7 +89,10 @@ class _GAProxy(  # type:ignore
             if _has_orig_class_storage(cls):
                 object.__setattr__(result, "__orig_class__", self)
             elif _slot_strategy(cls) == "class_swap":
-                object.__setattr__(result, "__class__", get_synth(self))
+                # Build the synthetic over the class the constructor actually
+                # returned -- a factory-style ``__new__`` may have produced a
+                # foreign subclass whose identity (and layout) must survive.
+                object.__setattr__(result, "__class__", get_synth(self, cls))
             elif _slot_strategy(cls) == "side_table":
                 if not remember_orig_class(result, self):
                     raise TypeError(

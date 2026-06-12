@@ -6,9 +6,9 @@ via `PYTHONPATH`). Each was reproduced before landing here.
 
 Status legend: 🔴 open · 🟢 fixed
 
-V1–V5 were fixed in commit `9a20faf` (with regression tests). V6–V7 are valid
-but deferred as documented limitations (see their entries for why and the
-proposed fix).
+V1–V5 were fixed in commit `9a20faf` (with regression tests). V6–V7 were
+initially deferred as documented limitations and have since been fixed too,
+with regression tests in `tests/test_attrs_dataclass_slots.py`.
 
 | ID | Sev | Source | Summary | Status |
 |----|-----|--------|---------|--------|
@@ -17,8 +17,8 @@ proposed fix).
 | V3 | medium | S1 | Missing `py.typed` marker despite `Typing :: Typed` classifier | 🟢 fixed |
 | V4 | medium | S5c/S1 | `class_swap` copy/pickle ignores `__getnewargs__` / arg-taking `__new__` | 🟢 fixed |
 | V5 | low | S3b | `Annotated` metadata containing typevars not substituted | 🟢 fixed |
-| V6 | medium | S5b | `class_swap` + origin custom `__reduce_ex__` silently loses parametrization | 🔴 open |
-| V7 | low | S5a | `class_swap` instance whose `__new__` returns a foreign subclass | 🔴 open |
+| V6 | medium | S5b | `class_swap` + origin custom `__reduce_ex__` silently loses parametrization | 🟢 fixed |
+| V7 | low | S5a | `class_swap` instance whose `__new__` returns a foreign subclass | 🟢 fixed |
 
 ---
 
@@ -114,13 +114,17 @@ proposed fix).
 - **Validation (repro on HEAD):** `class_swap` `Box[T]` with a custom
   `__reduce_ex__` returning `(Box, (self.x,))` → after `pickle` round-trip,
   `f()` returns `(typing.NoDefault,)` instead of `(int,)`. Silent — no error.
-- **Proposed fix (not yet applied):** the synthetic should route `__reduce_ex__`
-  through paramsight: call the origin's `__reduce_ex__`, then wrap the returned
-  callable so the reconstructed instance is re-swapped to the synthetic
-  (re-attaching the alias). This must honor the origin's custom reducer rather
-  than overriding it wholesale, which is why it is deferred for a careful,
-  separately-tested change rather than rushed in this pass.
-- **Status:** 🔴 open.
+- **Fix (applied):** when the underlying class overrides `__reduce_ex__`, the
+  synthetic installs a shim (`_synth_reduce_ex`) that calls the class's own
+  override — it controls reconstruction — and wraps the returned payload
+  (`_rewrap_reduced` / `_synth_rebuild`) so the rebuilt object is re-swapped
+  onto the synthetic, re-attaching the alias. The same honoring applies to a
+  custom `__reduce__` (which the synthetic's own `__reduce__` used to shadow),
+  and a reducer that embeds `type(self)` gets the synthetic substituted for the
+  real class in its args (pickling the synthetic by reference would fail).
+  Covered: direct custom `__reduce_ex__`, custom `__reduce__`, and a
+  super()-delegating `__reduce_ex__`, each through copy/deepcopy/pickle.
+- **Status:** 🟢 fixed (+ regression tests).
 
 ### V7 — `class_swap` instance whose `__new__` returns a foreign subclass
 
@@ -133,10 +137,15 @@ proposed fix).
   `SubWithSlot` (adds a slot) → `Base[int]()` raises `TypeError: __class__
   assignment: 'Base' object layout differs from 'SubWithSlot'`. A no-slot subclass
   → identity silently replaced (`isinstance(inst, SubNoSlot)` becomes `False`).
-- **Proposed fix (not yet applied):** build the synthetic over the *actual*
-  returned type rather than the origin (i.e. `type(result)`), or skip the swap
-  when `type(result)` is not the origin. Deferred: the construction patterns that
-  trigger this (a constructor returning a foreign subclass) are extremely rare,
-  and the correct behavior interacts with the synthetic-cache keying, so it wants
-  a dedicated change.
-- **Status:** 🔴 open.
+- **Fix (applied):** the synthetic is built over the class the constructor
+  actually returned (`get_synth(alias, type(result))`), preserving the foreign
+  subclass's identity and layout while still carrying the origin's alias —
+  mirroring how native (non-slotted) construction stamps `__orig_class__` on
+  whatever instance `__new__` returned. The synthetic cache is keyed
+  `(origin, base, args)`, reconstruction (`_synth_new`) rebuilds with the same
+  base, and `_unswapped` prevents synthetic-on-synthetic stacking when an
+  already-swapped instance is re-tracked. A constructor returning something
+  that isn't an `origin` instance at all stays untracked (the pre-existing
+  no-storage behavior).
+- **Status:** 🟢 fixed (+ regression tests, including the slot-adding subclass
+  and copy/deepcopy/pickle round-trips).

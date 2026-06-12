@@ -546,6 +546,150 @@ def test_class_swap_copy_pickle_with_arg_taking_new():
         assert isinstance(revived, SwapPair)
 
 
+@uses_class_swap
+class SwapCustomReduceEx[T]:
+    # A class bringing its own ``__reduce_ex__`` (V6): pickle/copy call it
+    # *before* ``__reduce__``, so paramsight must honor it -- it controls
+    # reconstruction -- and re-attach the parametrization around its payload.
+    # Module-level so pickle can find it.
+    __slots__ = ("x",)
+
+    def __init__(self, x):
+        self.x = x
+
+    def __reduce_ex__(self, protocol):
+        return (SwapCustomReduceEx, (self.x,))
+
+    @takes_alias
+    @classmethod
+    def get_type(cls):
+        return get_args_at_base(cls, SwapCustomReduceEx)
+
+
+@uses_class_swap
+class SwapCustomReduce[T]:
+    # Same for a custom ``__reduce__`` (without ``__reduce_ex__``), which the
+    # synthetic's own ``__reduce__`` would otherwise shadow outright.
+    __slots__ = ("x",)
+
+    def __init__(self, x):
+        self.x = x
+
+    def __reduce__(self):
+        return (SwapCustomReduce, (self.x,))
+
+    @takes_alias
+    @classmethod
+    def get_type(cls):
+        return get_args_at_base(cls, SwapCustomReduce)
+
+
+@uses_class_swap
+class SwapSuperReduceEx[T]:
+    # A delegating ``__reduce_ex__`` (calls the default machinery via super())
+    # must compose: the default machinery dispatches to the synthetic's
+    # ``__reduce__``, and the shim wraps that payload a second time.
+    __slots__ = ("x",)
+
+    def __init__(self, x):
+        self.x = x
+
+    def __reduce_ex__(self, protocol):
+        return super().__reduce_ex__(protocol)
+
+    @takes_alias
+    @classmethod
+    def get_type(cls):
+        return get_args_at_base(cls, SwapSuperReduceEx)
+
+
+def test_class_swap_custom_reduce_ex_keeps_parametrization():
+    # Regression (V6): a custom ``__reduce_ex__`` bypassed the synthetic's
+    # ``__reduce__``, so the revived instance was a bare origin -- typevar
+    # lookups silently resolved to NoDefault instead of the bound type.
+    inst = SwapCustomReduceEx[int](5)
+    assert inst.get_type() == (int,)
+    for revived in (
+        copy.copy(inst),
+        copy.deepcopy(inst),
+        pickle.loads(pickle.dumps(inst)),
+    ):
+        assert revived.get_type() == (int,)
+        assert revived.x == 5
+        assert isinstance(revived, SwapCustomReduceEx)
+
+
+def test_class_swap_custom_reduce_keeps_parametrization():
+    inst = SwapCustomReduce[str](7)
+    for revived in (
+        copy.copy(inst),
+        copy.deepcopy(inst),
+        pickle.loads(pickle.dumps(inst)),
+    ):
+        assert revived.get_type() == (str,)
+        assert revived.x == 7
+        assert isinstance(revived, SwapCustomReduce)
+
+
+def test_class_swap_delegating_reduce_ex_round_trips():
+    inst = SwapSuperReduceEx[bytes](9)
+    for revived in (
+        copy.copy(inst),
+        copy.deepcopy(inst),
+        pickle.loads(pickle.dumps(inst)),
+    ):
+        assert revived.get_type() == (bytes,)
+        assert revived.x == 9
+
+
+@uses_class_swap
+class SwapFactoryBase[T]:
+    # A factory-style ``__new__`` returning an instance of a *subclass* (V7).
+    # The swap must preserve the returned identity -- including a subclass that
+    # adds slots, which is layout-incompatible with the base itself.
+    __slots__ = ("a",)
+
+    def __new__(cls, *args, **kwargs):
+        if cls is SwapFactoryBase:
+            return object.__new__(SwapFactorySub)
+        return object.__new__(cls)
+
+    def __init__(self, a):
+        self.a = a
+
+    @takes_alias
+    @classmethod
+    def get_type(cls):
+        return get_args_at_base(cls, SwapFactoryBase)
+
+
+class SwapFactorySub(SwapFactoryBase):
+    __slots__ = ("b",)  # extra slot: layout differs from the base
+
+
+def test_class_swap_foreign_subclass_new_preserves_identity():
+    # Regression (V7): the swap targeted a synthetic of the *origin*, which
+    # raised "object layout differs" for a slot-adding subclass (and silently
+    # stripped the identity of a layout-compatible one). The synthetic must be
+    # built over the class the constructor actually returned.
+    inst = SwapFactoryBase[int](1)
+    assert isinstance(inst, SwapFactorySub)  # identity preserved
+    assert inst.get_type() == (int,)  # parametrization tracked
+    assert inst.a == 1
+
+
+def test_class_swap_foreign_subclass_survives_copy_pickle():
+    inst = SwapFactoryBase[int](1)
+    for revived in (
+        copy.copy(inst),
+        copy.deepcopy(inst),
+        pickle.loads(pickle.dumps(inst)),
+    ):
+        assert isinstance(revived, SwapFactorySub)
+        assert revived.get_type() == (int,)
+        assert revived.a == 1
+
+
 def test_class_swap_on_dataclass_slots_and_manual_slots():
     @uses_class_swap
     @dataclass(slots=True)

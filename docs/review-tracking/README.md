@@ -51,9 +51,9 @@ All 7 sessions ran and were triaged. Findings (after independent validation):
 - **5 fixed** with regression tests in commit `9a20faf` (V1 defaults coercion,
   V2 non-descriptor `__init_subclass__`, V3 `py.typed`, V4 class_swap newargs,
   V5 Annotated metadata).
-- **2 deferred** as documented limitations (V6 class_swap `__reduce_ex__`, V7
-  class_swap foreign-subclass return) — both exotic and/or needing a careful,
-  separately-tested change.
+- **2 initially deferred**, since fixed (V6 class_swap `__reduce_ex__`, V7
+  class_swap foreign-subclass return) — see their entries for the applied
+  fixes and regression coverage.
 - **1 rejected** in [`rejected-suggestions.md`](rejected-suggestions.md) (R1 was
   real at commit `664e721` but already remediated by `41077a0`).
 - Sessions S6 and S7 found nothing.
@@ -62,4 +62,4 @@ All 7 sessions ran and were triaged. Findings (after independent validation):
 
 - [x] All sessions complete
 - [x] All findings triaged
-- [x] Actionable fixes landed (V1–V5 in `9a20faf`; V6–V7 documented open)
+- [x] All fixes landed (V1–V5 in `9a20faf`; V6–V7 in the V6/V7 fix commit)
