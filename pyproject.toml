@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "paramsight"
-version = "0.1.0"
+version = "0.2.0"
 description = "Runtime type-parameter resolution for Python generics, plus generic-alias access inside classmethods."
 readme = "README.md"
 requires-python = ">=3.13"
