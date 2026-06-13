@@ -50,14 +50,64 @@ def get_origin_robust(ga: Any) -> type | None:
     return res
 
 
+# These ``isinstance`` checks assume the stdlib typevar classes are canonical.
+# That holds on 3.13 (where ``typing_extensions`` re-exports them), but NOT on
+# earlier interpreters, where ``typing_extensions`` ships distinct backport
+# classes a bare ``isinstance(x, typing.TypeVar)`` would miss. See
+# docs/python-version-support.md before lowering the floor.
 def _is_typevar(x: Any) -> TypeGuard[TypeVar]:
-    if isinstance(x, TypeVar):
-        return True
-    return getattr(x, "__class__", type(x)).__name__ == "TypeVar"
+    return isinstance(x, TypeVar)
+
+
+def _is_typevartuple(x: Any) -> bool:
+    """``*Ts`` -- a PEP 646 ``TypeVarTuple``. Not a ``TypeVar``; binds to a
+    *sequence* of types and appears in containers wrapped in ``Unpack[...]``."""
+    return isinstance(x, typing.TypeVarTuple)
+
+
+def _is_paramspec(x: Any) -> bool:
+    """``**P`` -- a PEP 612 ``ParamSpec``. Not a ``TypeVar``; binds to a parameter
+    list and appears as the first argument of a ``Callable``."""
+    return isinstance(x, typing.ParamSpec)
+
+
+def _is_unpack(x: Any) -> bool:
+    """``*Ts`` / ``Unpack[Ts]`` as it appears inside a container's arguments."""
+    return get_origin(x) is typing.Unpack
+
+
+def _unpack_inner(x: Any) -> Any:
+    """The ``TypeVarTuple`` (or other unpackable) inside an ``Unpack[...]``."""
+    (inner,) = get_args(x)
+    return inner
 
 
 def _get_typevar_default(tv: Any) -> Any:
     return getattr(tv, "__default__", getattr(tv, "default", _NODEFAULT))
+
+
+def coerce_to_type_form(value: Any) -> Any:
+    """Coerce a raw value into the type-domain form that subscription produces.
+
+    A typevar's ``__default__`` is stored in *source* form: ``T = None`` keeps
+    the ``None`` singleton and ``T = "Foo"`` keeps the bare string ``"Foo"``.
+    Type *subscription* normalizes those -- ``C[None]`` yields ``NoneType`` and
+    ``C["Foo"]`` yields ``ForwardRef('Foo')`` -- via ``typing._type_convert``.
+    Running a default through the same conversion keeps the default branch
+    (``C``) and the explicit branch (``C[default]``) byte-for-byte identical;
+    notably this is *conversion*, not evaluation, so (like subscription) it
+    leaves nested strings alone and never needs a namespace.
+
+    Falls back to a manual ``None -> NoneType`` if the private ``typing`` helper
+    ever disappears -- that being the one coercion paramsight actually relies on.
+    """
+    convert = getattr(typing, "_type_convert", None)
+    if convert is not None:
+        try:
+            return convert(value)
+        except Exception:
+            pass
+    return type(None) if value is None else value
 
 
 def unwrap_annotated(param: Any) -> type:
@@ -108,18 +158,15 @@ def _make_issubclass_guard[T](t: type[T]) -> Callable[[Any], TypeGuard[type[T]]]
 def get_parameters(cls: type | GenericAlias):
     orig = get_origin_robust(cls) or cls
     assert isinstance(orig, type)
-    old_style_params = getattr(orig, "__parameters__", get_args_robust(cls))
-    if len(orig.__type_params__) != len(old_style_params):
-        if not old_style_params:
-            return orig.__type_params__
-        if not orig.__type_params__:
-            return old_style_params
-        raise ValueError(
-            f"""inconsistent number of parameters for {orig.__name__}: 
-            {orig.__type_params__} != {old_style_params}
-            """
-        )
-    return orig.__type_params__
+    # A PEP 695 class carries authoritative ``__type_params__``; trust it. Only an
+    # old-style ``Generic[T]`` class (empty ``__type_params__``) needs the derived
+    # ``__parameters__``. This ordering matters mid-creation: during a descriptor's
+    # ``__set_name__`` a subclass transiently exposes its *base's* inherited
+    # ``__parameters__`` -- a different, often shorter list (acutely so with a
+    # ``TypeVarTuple``) -- so ``__type_params__`` is the only reliable source then.
+    if orig.__type_params__:
+        return orig.__type_params__
+    return getattr(orig, "__parameters__", get_args_robust(cls))
 
 
 def get_num_typevars(cls: type | GenericAlias) -> int:

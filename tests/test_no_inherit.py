@@ -1,6 +1,5 @@
 from typing import Any, Protocol
 
-import pytest
 from attrs import define
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -12,8 +11,12 @@ from paramsight.aliasclassmethod import (
     takes_alias,
 )
 
-# torch is an optional compat target; skip this module if it isn't installed.
-nn = pytest.importorskip("torch.nn")
+# torch is an optional compat target: only the nn.Module fixture skips when
+# it's missing -- the rest of the module runs everywhere.
+try:
+    import torch.nn as nn
+except ImportError:
+    nn = None
 
 # ---------------------------------------------------------------------------
 # Test fixtures / helpers
@@ -164,7 +167,10 @@ class CheckAttrs[T]:
             super().__init_subclass__()
 
 
-class CheckTorch[T](nn.Module): ...
+if nn is not None:
+    # Referenced only by the commented-out mixture tests below; kept so they
+    # can be revived without archaeology.
+    class CheckTorch[T](nn.Module): ...
 
 
 class DoesNothing: ...

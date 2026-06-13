@@ -11,6 +11,13 @@ from paramsight.slotted_strategies import (
 )
 
 _generic_alias_fields = [
+    # ``__class__`` must report the proxy's *own* type, not be delegated to the
+    # origin. Delegating returns the origin's metaclass (``type``), which makes
+    # ``isinstance(proxy, type)`` true -- so ``typing._type_repr`` (used by union
+    # repr) treats the proxy as a class and prints it without its args
+    # (``Box`` instead of ``Box[int]``). A normal generic alias reports its own
+    # type here; the proxy must too.
+    "__class__",
     "_inst",
     "_name",
     "__origin__",
@@ -89,7 +96,10 @@ class _GAProxy(  # type:ignore
             if _has_orig_class_storage(cls):
                 object.__setattr__(result, "__orig_class__", self)
             elif _slot_strategy(cls) == "class_swap":
-                object.__setattr__(result, "__class__", get_synth(self))
+                # Build the synthetic over the class the constructor actually
+                # returned -- a factory-style ``__new__`` may have produced a
+                # foreign subclass whose identity (and layout) must survive.
+                object.__setattr__(result, "__class__", get_synth(self, cls))
             elif _slot_strategy(cls) == "side_table":
                 if not remember_orig_class(result, self):
                     raise TypeError(

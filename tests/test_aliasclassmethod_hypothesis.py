@@ -11,8 +11,15 @@ from paramsight.aliasclassmethod import (
     takes_alias,
 )
 
-# torch is an optional compat target; skip this module if it isn't installed.
-nn = pytest.importorskip("torch.nn")
+# torch is an optional compat target: only the nn.Module fixtures/tests skip
+# when it's missing -- the rest of the module (notably the patch_super
+# coverage) must run everywhere.
+try:
+    import torch.nn as nn
+except ImportError:
+    nn = None
+
+requires_torch = pytest.mark.skipif(nn is None, reason="torch is not installed")
 
 # ---------------------------------------------------------------------------
 # Test fixtures / helpers
@@ -129,7 +136,9 @@ class CheckAttrs[T](CheckCls):
     _paramsight_slots = "side_table"
 
 
-class CheckTorch[T](nn.Module, CheckCls): ...
+if nn is not None:
+
+    class CheckTorch[T](nn.Module, CheckCls): ...
 
 
 class DoesNothing: ...
@@ -193,12 +202,11 @@ def test_aliasclassmethod_on_pydantic_base_model(t: type):
 
 @DEFAULT_SETTINGS
 @given(t=TYPE_STRAT)
-def test_mixtures_with_basemodel_and_attrs_and_torch(t: type):
+def test_mixtures_with_basemodel_and_attrs(t: type):
     # Classmethod paths
     CheckBaseModel[t].check()
     CheckBaseModel2[t].check()
     CheckAttrs[t].check()
-    CheckTorch[t].check()
 
     # Instance paths (where your CheckCls methods are also invoked)
     CheckBaseModel[t]().check()
@@ -210,25 +218,33 @@ def test_mixtures_with_basemodel_and_attrs_and_torch(t: type):
     if isinstance(value, t):
         CheckBaseModel2[t](field=value).check()
     CheckAttrs[t]().check()
+
+
+@requires_torch
+@DEFAULT_SETTINGS
+@given(t=TYPE_STRAT)
+def test_mixture_with_torch(t: type):
+    CheckTorch[t].check()
     # nn.Module subclass with no parameters should instantiate fine
     CheckTorch[t]().check()
 
 
-@pytest.mark.parametrize(
-    "cls",
-    [
-        CheckPlain,
-        CheckPlainSuper,
-        CheckPlainSuperDuper,
-        CheckBaseModel,
-        CheckBaseModel2,
-        CheckAttrs,
-        CheckTorch,
-        CheckBasicBaseModel,  # still okay in non-generic form
-        BaseModelWithNothing,
-        Simple,
-    ],
-)
+_NON_GENERIC_CHECK_CLASSES = [
+    CheckPlain,
+    CheckPlainSuper,
+    CheckPlainSuperDuper,
+    CheckBaseModel,
+    CheckBaseModel2,
+    CheckAttrs,
+    CheckBasicBaseModel,  # still okay in non-generic form
+    BaseModelWithNothing,
+    Simple,
+]
+if nn is not None:
+    _NON_GENERIC_CHECK_CLASSES.append(CheckTorch)
+
+
+@pytest.mark.parametrize("cls", _NON_GENERIC_CHECK_CLASSES)
 def test_check_non_generic_accepts_plain_classes(cls):
     # Your implementation asserts that for non-specialized calls
     # the “cls” seen by the method is a regular class type.
