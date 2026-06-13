@@ -234,13 +234,14 @@ def _subst_args(args: tuple[Any, ...], subs: dict[Any, Any]) -> tuple[Any, ...]:
       ``*tuple[...]`` spelling (see ``_restarred_unbounded_unpack``);
     - a plain tuple/list member is a ParamSpec parameter list forwarded
       through a generic alias (``C[[T]]`` stores ``(T,)`` in ``__args__``) or
-      the empty-``*Ts`` marker ``()``: substitute its members, keeping the
+      the empty-``*Ts`` marker ``()``: substitute its members with this same
+      walk (so a bound ``*Ts`` inside the list flattens too), keeping the
       tuple shape for the binding stage to normalize.
     """
     out: list[Any] = []
     for a in args:
         if isinstance(a, (tuple, list)):
-            out.append(tuple(_substitute_typevars(m, subs) for m in a))
+            out.append(_subst_args(tuple(a), subs))
             continue
         if _is_unpack(a):
             inner = _unpack_inner(a)
@@ -286,16 +287,23 @@ def _collect_typevars(value: Any, out: list[Any] | None = None) -> list[Any]:
 def _normalize_paramspec_arg(arg: Any, subs: dict[Any, Any]) -> Any:
     """Normalize a ParamSpec binding to a parameter list. The arg can be a
     tuple/list of types, a bare type (``C[int]`` shorthand for ``[int]``), ``...``,
-    or a forwarded ParamSpec; produce a tuple of substituted types (passing ``...``
-    or a ParamSpec straight through). The Callable branch turns the tuple into the
-    ``[p, ...]`` list form."""
-    if arg is Ellipsis or _is_paramspec(arg):
+    or another ParamSpec; produce a tuple of substituted types (passing ``...``
+    straight through). The Callable branch turns the tuple into the ``[p, ...]``
+    list form."""
+    if arg is Ellipsis:
         return arg
+    if _is_paramspec(arg):
+        # A forwarded ParamSpec resolves through the bindings so far: a PEP 696
+        # default may name an earlier ParamSpec (``**Q = P``), and Python
+        # auto-fills that default into ``__args__`` as the raw symbol. An
+        # unbound one stays itself (still-symbolic, reads as unresolved).
+        return subs.get(arg, arg)
     # Coerce each member the way subscription coerces scalar args (``None`` ->
     # ``NoneType``, ``"Foo"`` -> ``ForwardRef``) so the explicit list spelling
-    # ``C[[None, "Foo"]]`` agrees with the shorthand ``C[None, "Foo"]``.
+    # ``C[[None, "Foo"]]`` agrees with the shorthand ``C[None, "Foo"]``. The
+    # unpack-aware walk also flattens a bound ``*Ts`` member (``C[[*Ts]]``).
     if isinstance(arg, (tuple, list)):
-        return tuple(_substitute_typevars(coerce_to_type_form(a), subs) for a in arg)
+        return _subst_args(tuple(coerce_to_type_form(a) for a in arg), subs)
     return (_substitute_typevars(coerce_to_type_form(arg), subs),)
 
 

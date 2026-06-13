@@ -753,6 +753,37 @@ def test_paramspec_list_forwarded_through_alias_substitutes():
     assert _PSFwd.x_opt is None
 
 
+# A forwarded parameter list may itself contain a ``*Ts`` unpack; flattening it
+# must use the same unpack-aware walk as any other arg sequence. Regression:
+# the tuple was substituted member-wise, leaving a bound ``Unpack[Ts]`` whole.
+# (Runtime-valid subscriptions pyright rejects -- an unpack inside a parameter
+# list -- hence the ignores.)
+class _PSUnpackList[*Ts](_ParamSpecArch[[*Ts]]): ...  # type: ignore[valid-type]
+
+
+class _PSUnpackListMixed[*Ts](_ParamSpecArch[[bool, *Ts]]): ...  # type: ignore[valid-type]
+
+
+def test_paramspec_list_with_typevartuple_unpack_flattens():
+    assert _is_callable_of(_PSUnpackList[int, str].x_type, [int, str], int)
+    assert _is_callable_of(_PSUnpackListMixed[bytes].x_type, [bool, bytes], int)
+    assert _PSUnpackList.x_opt is None  # free *Ts -> unresolved
+
+
+# PEP 696 lets a ParamSpec default name an *earlier* ParamSpec; the forwarded
+# symbol must resolve through the bindings so far (both from P's own default on
+# the bare class and from an explicit P arg that Python auto-fills into Q).
+# Regression: the symbol was passed through raw and read as unresolved.
+class _PSFwdDefault[**P = [int], **Q = P](_PBase[Callable[Q, str]]): ...
+
+
+def test_paramspec_default_forwarding_another_paramspec():
+    assert _is_callable_of(_PSFwdDefault.x_type, [int], str)
+    assert _is_callable_of(_PSFwdDefault[[bytes]].x_type, [bytes], str)
+    # an explicit Q overrides the forwarded default
+    assert _is_callable_of(_PSFwdDefault[[bytes], [str]].x_type, [str], str)
+
+
 class _ConcatEllipsis[**P](_PBase[Callable[Concatenate[int, P], str]]): ...
 
 
