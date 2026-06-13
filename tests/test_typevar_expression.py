@@ -65,6 +65,33 @@ def test_self_is_the_most_derived_receiver():
     assert get_args(members[1]) == (str,)
 
 
+class SelfOnly[T]:
+    self_t = TypeVarExpression[Self]()
+    self_opt = TypeVarExpressionOption[Self]()
+
+
+def test_bare_self_resolves_to_receiver_alias():
+    # The expression being *just* ``Self`` substitutes the same as ``Self``
+    # inside a larger expression -- to the receiver alias, statically and at
+    # runtime.
+    resolved = SelfOnly[int].self_t
+    assert get_origin(resolved) is SelfOnly
+    assert get_args(resolved) == (int,)
+    assert SelfOnly[int]().self_t == resolved  # instance access too
+    assert_type(SelfOnly[int].self_t, type[SelfOnly[int]])
+
+
+def test_bare_self_on_bare_class_is_the_class_itself():
+    # ``Self`` is the receiver as-given: a bare, unspecialized receiver gives
+    # the bare class. The expression references no unbound type parameter, so
+    # it is *resolved* (unlike ``Self | T`` on a bare receiver, where the free
+    # T makes it unresolved). Mirrors the static view -- pyright types
+    # ``SelfOnly.self_t`` as ``type[SelfOnly[Unknown]]``: a SelfOnly with
+    # unknown args, not an error.
+    assert SelfOnly.self_t is SelfOnly
+    assert SelfOnly.self_opt is SelfOnly
+
+
 # ---------------------------------------------------------------------------
 # Multiple typevars and variadic typevars in one expression
 # ---------------------------------------------------------------------------
