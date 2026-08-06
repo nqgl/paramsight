@@ -12,7 +12,7 @@
 
 ## Requirements
 
-- Python 3.13 or greater (maybe works on 3.12?)
+- Python 3.13 or greater
 
 ## Installation
 Clone the repository, then
