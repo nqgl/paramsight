@@ -2,6 +2,7 @@ import importlib
 import inspect
 import types
 import warnings
+from collections.abc import Callable
 from types import FunctionType
 from typing import Self
 
@@ -49,6 +50,12 @@ class ObjRef[T = object](BaseModel):
         return t  # type: ignore
 
     def get_obj(self, strict: bool = False) -> T:
+        """Load an object and check the runtime part of its declared type.
+
+        Callable parameter/return annotations are a static contract. At runtime
+        only callability is checked; loading never invokes the target or infers
+        a signature from its implementation.
+        """
         module = importlib.import_module(self.module)
         obj = getattr(module, self.obj_name)
         if get_src(obj) != self.source_backup:
@@ -63,7 +70,10 @@ class ObjRef[T = object](BaseModel):
                 )
         t = self.get_t()
 
-        if get_origin_robust(t) is type:
+        origin = get_origin_robust(t)
+        if origin is Callable:
+            valid = callable(obj)
+        elif origin is type:
             import typing
 
             # type_t = get_args_at_base(t, type)

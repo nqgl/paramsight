@@ -272,7 +272,8 @@ The type info rides along under a `generic_type` field (a tuple of `TypeRef`s �
 
 **Caveats:**
 - The bare model dispatches to a specialized alias via a `@model_validator(mode="wrap")` that reconstructs `GenericBaseModel[...]` from the carried type info and re-validates against it. This uses only public pydantic APIs (`model_validator`, `__class_getitem__`, `model_validate`), so it isn't especially fragile — but the wrap validator is inherited, so it adds a (cheap) layer of indirection to every subclass's validation.
-- **Don't deserialize untrusted input with it.** A `TypeRef` is `module + qualified name`, and loading one calls `importlib.import_module` + `getattr` — so a malicious payload can trigger arbitrary imports / attribute lookups *before* the declared-parameter `issubclass`/`isinstance` check runs.
+- **Don't deserialize untrusted input with it.** A `TypeRef` is `module + qualified name`, and loading one calls `importlib.import_module` + `getattr` — so a malicious payload can trigger arbitrary imports / attribute lookups *before* the declared-parameter runtime check runs.
+- `ObjRef[Callable[...]]` checks callability without invoking the target. Callable argument and return annotations remain a static contract; this is not runtime signature validation. Concrete class references retain their `isinstance`/`issubclass` checks.
 - A `TypeRef` also keeps a `source_backup` and warns (or, in strict mode, raises) if the referenced object's source code has changed since serialization. Useful for catching drift, but an unusual behavior to be aware of.
 - Not re-exported from the package root — import it from `paramsight.generic_restored_basemodel.generic_basemodel`.
 
@@ -370,4 +371,3 @@ This library leans on the details of Python 3.13's generics machinery. Use with 
 - The AST rewriting may have unforeseen interactions
 
 The core — `get_args_at_base` / `get_typevar_value`, `@takes_alias` *without* `patch_super`, and `TypeVarValue` — does no AST rewriting and does not need source access.
-
