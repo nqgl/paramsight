@@ -1,30 +1,50 @@
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from functools import lru_cache
+from types import UnionType
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import (
     BaseModel,
+    SerializationInfo,
     ValidationInfo,
     computed_field,
     model_serializer,
     model_validator,
 )
-from pydantic_core import PydanticCustomError
+from pydantic_core import PydanticCustomError, SchemaSerializer, to_json
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
 from paramsight import get_args_at_base, takes_alias
 from paramsight.generic_restored_basemodel.typeref import TypeRef
-from paramsight.type_utils import get_num_typevars, get_origin_robust, is_generic_alias
+from paramsight.type_utils import (
+    get_args_robust,
+    get_num_typevars,
+    get_origin_robust,
+    get_parameters,
+    is_generic_alias,
+)
 
 
 def _origin_issubclass(value: Any, base: Any) -> bool:
     """``issubclass`` that tolerates generic aliases without raising.
 
-    Both operands are reduced to their unsubscripted origin (so ``list[int]``
-    is compared as ``list``). This is a *validation* check on possibly-hostile
-    deserialized type info, so it fails **closed**: if a meaningful class
-    comparison can't be made, return ``False`` and let the caller reject it
-    rather than waving it through.
+    Ordinary class arguments may narrow covariantly, including under a bounded
+    TypeVar. Parameterized arguments must retain their inner arguments: treating
+    list[str] as list[int] merely because both originate from list is unsafe.
+    This is conservative validation, not a general-purpose subtype solver.
     """
+    if value == base or base is Any:
+        return True
+    if isinstance(base, TypeVar):
+        if base.__constraints__:
+            return any(_origin_issubclass(value, item) for item in base.__constraints__)
+        return base.__bound__ is None or _origin_issubclass(value, base.__bound__)
+    if get_origin_robust(value) is UnionType:
+        return all(_origin_issubclass(item, base) for item in get_args_robust(value))
+    if get_origin_robust(base) is UnionType:
+        return any(_origin_issubclass(value, item) for item in get_args_robust(base))
+    if get_args_robust(base) and get_args_robust(value) != get_args_robust(base):
+        return False
     value = get_origin_robust(value) or value
     base = get_origin_robust(base) or base
     if isinstance(value, type) and isinstance(base, type):
@@ -32,19 +52,71 @@ def _origin_issubclass(value: Any, base: Any) -> bool:
     return False
 
 
+@lru_cache(maxsize=128)
+def _concrete_serializer(
+    model: type[BaseModel], schema_identity: int
+) -> SchemaSerializer:
+    """Serialize this model's schema, without recursively invoking its wrapper.
+
+    Only the root model's serializer is removed. Nested field schemas and their
+    serializers remain intact. The schema identity invalidates this bounded
+    cache after model_rebuild(), without mutating Pydantic's shared schema.
+    """
+
+    def unwrap(schema: Any) -> Any:
+        if not isinstance(schema, dict):
+            return schema
+        if schema.get("type") == "model":
+            if schema.get("cls") is not model:
+                return schema
+            result = schema.copy()
+            result.pop("serialization", None)
+            return result
+        result = schema.copy()
+        if "schema" in schema:
+            result["schema"] = unwrap(schema["schema"])
+        if "definitions" in schema:
+            result["definitions"] = [unwrap(item) for item in schema["definitions"]]
+        return result
+
+    return SchemaSerializer(unwrap(model.__pydantic_core_schema__))
+
+
 class GenericBaseModel(BaseModel):
     _GENERIC_KEY: ClassVar[str] = "generic_type"
 
-    @computed_field
+    @computed_field(alias="generic_type")
     @property
     def generic_type(self) -> tuple[TypeRef, ...]:
         return tuple(TypeRef.from_ga(t) for t in self.get_type_parameters())
 
     @model_serializer(mode="wrap")
     def _drop_empty_generic_type(
-        self, handler: SerializerFunctionWrapHandler
+        self, _handler: SerializerFunctionWrapHandler, info: SerializationInfo
     ) -> dict[str, Any]:
-        data = handler(self)
+        # A field annotated G[Base] may contain G[Derived]. Serialize using the
+        # concrete model's schema so its carried type and fields stay consistent.
+        # Unlike serialize_as_any=True, this does not broaden ordinary declared
+        # fields or disclose unrelated subclass-only fields.
+        serializer = _concrete_serializer(
+            type(self), id(type(self).__pydantic_core_schema__)
+        )
+        # Pydantic's SerializationInfo and serializer signatures disagree on
+        # mixed-key include/exclude masks. Forward its own masks intact.
+        selection: dict[str, Any] = {"include": info.include, "exclude": info.exclude}
+        data = serializer.to_python(
+            self,
+            **selection,
+            mode=info.mode,
+            by_alias=info.by_alias,
+            exclude_unset=info.exclude_unset,
+            exclude_defaults=info.exclude_defaults,
+            exclude_none=info.exclude_none,
+            exclude_computed_fields=info.exclude_computed_fields,
+            round_trip=info.round_trip,
+            context=info.context,
+            serialize_as_any=info.serialize_as_any,
+        )
         if isinstance(data, dict) and not data.get(self._GENERIC_KEY):
             data.pop(self._GENERIC_KEY, None)
         return data
@@ -57,63 +129,62 @@ class GenericBaseModel(BaseModel):
     @takes_alias
     @classmethod
     def _select_specialized_alias(
-        cls,
+        cls: Any,
         value: Any,
     ) -> tuple[Any, Any]:
         """Pick the model to validate ``value`` against.
 
         Returns ``(target, value)``. ``target`` is a ``GenericBaseModel``
-        (sub)class or a parameterized alias of one — typed ``Any`` because it
-        spans pydantic-generated specialization classes and typing aliases,
+        (sub)class or a parameterized alias of one. The receiver and target use
+        ``Any`` at this reflection boundary because the runtime generic arity
+        is not expressible as ``type[Self]`` and the supported receiver types
+        span pydantic-generated specialization classes and typing aliases,
         which have no common static type. If ``target is cls`` the caller
         validates normally; otherwise it delegates to
         ``target.model_validate``.
         """
         if get_num_typevars(cls) == 0:
             return cls, value
-        ga_params = None
-        if is_generic_alias(cls):
-            ga_params = cls.get_type_parameters()
+        origin: Any = get_origin_robust(cls) or cls
+        ga_params = (
+            cls.get_type_parameters() if is_generic_alias(cls) else get_parameters(cls)
+        )
         if isinstance(value, GenericBaseModel):
-            return type(value), value
-
-        if not isinstance(value, Mapping):
-            if ga_params is not None:
+            if not _origin_issubclass(type(value), origin):
                 return cls, value
+            tvs = get_args_at_base(type(value), origin)
+            normalized = value
+            alias = type(value)
+        else:
+            if not isinstance(value, Mapping):
+                return cls, value
+            try:
+                raw_tvs = value[cls._GENERIC_KEY]
+            except KeyError:
+                return cls, value
+
+            tvs = tuple(TypeRef.model_validate(tv).get() for tv in raw_tvs)
+            # This is transport metadata, not a user field. Keep extra='forbid'
+            # meaningful for other keys, without mutating the caller's mapping.
+            normalized = dict(value)
+            del normalized[cls._GENERIC_KEY]
+            alias = None
+        if len(tvs) != len(ga_params):
             raise PydanticCustomError(
                 "generic_model_type",
-                "GenericModel expects a mapping when deserializing unspecialized type",
+                "GenericModel expects {expected} type arguments, got {actual}",
+                {"expected": len(ga_params), "actual": len(tvs)},
             )
-        try:
-            raw_tvs = value[cls._GENERIC_KEY]
-        except KeyError:
-            return cls, value
-
-        tvs = tuple(TypeRef.model_validate(tv).get() for tv in raw_tvs)
-        if not tvs:
-            return cls, value
-        if ga_params is not None:
-            if len(tvs) != len(ga_params):
-                raise PydanticCustomError(
-                    "generic_model_type",
-                    "GenericModel expects {expected} type arguments, got {actual}",
-                    {"expected": len(ga_params), "actual": len(tvs)},
-                )
-            if not all(  # assuming covariance? not clear if this is best
-                _origin_issubclass(tv, param)
-                for tv, param in zip(tvs, ga_params, strict=True)
-            ):
-                raise PydanticCustomError(
-                    "generic_model_type",
-                    "GenericModel expects type arguments to be subclasses "
-                    "of {expected}",
-                    {"expected": ga_params},
-                )
-
-        # tvs are runtime-resolved types/aliases; the checker can't model
-        # dynamic pydantic specialization here.
-        alias = cls.__class_getitem__(tvs)  # pyright: ignore[reportArgumentType]
-        return alias, value
+        if not all(
+            _origin_issubclass(tv, param)
+            for tv, param in zip(tvs, ga_params, strict=True)
+        ):
+            raise PydanticCustomError(
+                "generic_model_type",
+                "GenericModel expects type arguments to be subclasses of {expected}",
+                {"expected": ga_params},
+            )
+        return (origin[*tvs] if alias is None else alias), normalized
 
     @model_validator(mode="wrap")
     @classmethod
@@ -123,14 +194,22 @@ class GenericBaseModel(BaseModel):
         """Make the *unspecialized* GenericBaseModel dispatch to the right
         ``GenericBaseModel[...]`` based on the carried ``generic_type`` info.
 
-        Specialized aliases and non-generic subclasses validate normally — only
-        the bare generic model needs to dispatch.
+        Compatible concrete specializations are preserved under more general
+        annotations. Incompatible carried arguments are rejected before dispatch.
+
+        Dispatch preserves JSON mode and context, but Pydantic does not
+        expose per-call validation overrides through ValidationInfo. Such
+        overrides are not forwarded to the selected model by this boundary.
         """
-        if is_generic_alias(cls) or get_num_typevars(cls) == 0:
+        if get_num_typevars(cls) == 0:
             return handler(value)
         alias, normalized = cls._select_specialized_alias(value)
         if alias is cls:
             return handler(normalized)
+        if info.mode == "json":
+            # Re-enter JSON validation so strict JSON-aware fields such as Path
+            # do not receive Python-mode strings. Context is carried explicitly.
+            return alias.model_validate_json(to_json(normalized), context=info.context)
         return alias.model_validate(normalized, context=info.context)
 
 

@@ -268,10 +268,21 @@ assert restored == original                 # the [int, str] specialization surv
 assert type(restored) is Pair[int, str]
 ```
 
-The type info rides along under a `generic_type` field (a tuple of `TypeRef`s — module + qualified name, recursively for nested generic args). Models with no generic parameters serialize nothing extra. Built on `@takes_alias` + `get_args_at_base`.
+The type info rides along under a `generic_type` field (a tuple of `TypeRef`s — module + qualified name, recursively for nested generic args). It is consumed as transport metadata, so strict models can retain `extra="forbid"` for actual unexpected fields. Models with no generic parameters serialize nothing extra. Built on `@takes_alias` + `get_args_at_base`.
+
+Compatible concrete specializations also survive more general field annotations:
+`G[int]` can remain `G[int]` inside a field annotated `G[object]` or `G[T]` with
+a compatible bound. Its concrete generic field schemas are used for output, so
+derived fields are not sliced away. Ordinary non-generic field annotations keep
+their normal Pydantic serialization behavior; this is not blanket duck typing.
+Incompatible arguments are rejected. Bounds, constraints, and unions are checked;
+nested parameterized arguments are conservatively invariant rather than assuming
+that matching origins imply compatible arguments.
 
 **Caveats:**
-- The bare model dispatches to a specialized alias via a `@model_validator(mode="wrap")` that reconstructs `GenericBaseModel[...]` from the carried type info and re-validates against it. This uses only public pydantic APIs (`model_validator`, `__class_getitem__`, `model_validate`), so it isn't especially fragile — but the wrap validator is inherited, so it adds a (cheap) layer of indirection to every subclass's validation.
+- A `@model_validator(mode="wrap")` dispatches to the compatible concrete alias. JSON validation re-enters JSON mode rather than Python mode, preserving JSON-aware fields such as `Path` and forwarding validation context. Pydantic does not expose every per-call override through `ValidationInfo`, so overrides such as per-call `strict` are not forwarded when dispatch selects a different alias. Class configuration still applies.
+- Concrete serialization uses Pydantic's core schema and `SchemaSerializer`, cached with a bounded, schema-identity-aware cache. Only the root model's serializer wrapper is removed; nested field schemas are not widened. Include/exclude masks, aliases, context and standard serialization flags are forwarded. Custom fallback/warning controls are not exposed by `SerializationInfo` and are not forwarded to this serializer.
+- Pydantic's own wrap-validator limitations still apply. In particular, a no-op model wrapper on the inspected Pydantic 2.13.5 rejects strict JSON tuple fields; this library change does not claim to fix that upstream behavior.
 - **Don't deserialize untrusted input with it.** A `TypeRef` is `module + qualified name`, and loading one calls `importlib.import_module` + `getattr` — so a malicious payload can trigger arbitrary imports / attribute lookups *before* the declared-parameter runtime check runs.
 - `ObjRef[Callable[...]]` checks callability without invoking the target. Callable argument and return annotations remain a static contract; this is not runtime signature validation. Concrete class references retain their `isinstance`/`issubclass` checks.
 - A `TypeRef` also keeps a `source_backup` and warns (or, in strict mode, raises) if the referenced object's source code has changed since serialization. Useful for catching drift, but an unusual behavior to be aware of.
