@@ -43,12 +43,23 @@ def _origin_issubclass(value: Any, base: Any) -> bool:
         return all(_origin_issubclass(item, base) for item in get_args_robust(value))
     if get_origin_robust(base) is UnionType:
         return any(_origin_issubclass(value, item) for item in get_args_robust(base))
-    if get_args_robust(base) and get_args_robust(value) != get_args_robust(base):
-        return False
-    value = get_origin_robust(value) or value
-    base = get_origin_robust(base) or base
-    if isinstance(value, type) and isinstance(base, type):
-        return issubclass(value, base)
+    value_origin = get_origin_robust(value) or value
+    base_origin = get_origin_robust(base) or base
+    if isinstance(value_origin, type) and isinstance(base_origin, type):
+        if not issubclass(value_origin, base_origin):
+            return False
+        base_args = get_args_robust(base)
+        if base_args:
+            # A subclass can introduce unrelated parameters while fixing the
+            # bound base's output: Child[Input] may inherit Producer[Output].
+            # Compare at the declared base, not at the subclass's own arity.
+            try:
+                projected = get_args_at_base(value, base_origin)
+            except (TypeError, ValueError, KeyError):
+                return False
+            if projected != base_args:
+                return False
+        return True
     return False
 
 
