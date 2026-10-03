@@ -3,8 +3,10 @@ import inspect
 import types
 import warnings
 from collections.abc import Callable
+from functools import reduce
+from operator import or_
 from types import FunctionType
-from typing import Self
+from typing import Any, Self, Union, override
 
 from pydantic import AliasChoices, BaseModel, Field
 
@@ -12,7 +14,7 @@ from paramsight import get_args_at_base, takes_alias
 from paramsight.type_utils import get_origin_robust
 
 
-def get_src(obj):
+def get_src(obj: Any) -> str:
     if obj.__module__ == "builtins":
         return "builtins"
     module = importlib.import_module(obj.__module__)
@@ -85,7 +87,8 @@ class ObjRef[T = object](BaseModel):
             raise ValueError(f"loaded object is not of type {self.get_t()}: {obj}")
         return obj
 
-    def __repr__(self):
+    @override
+    def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(module={self.module}, cls_name={self.obj_name})"
         )
@@ -96,23 +99,40 @@ class TypeRef(BaseModel):
     params: "tuple[TypeRef, ...] | None" = None
 
     @classmethod
-    def from_ga(cls, ga):
+    def from_ga(cls, ga: Any) -> Self:
         from paramsight.type_utils import get_args_robust, get_origin_robust
 
+        if ga is types.NoneType:
+            return cls(
+                base=ObjRef[type](
+                    module="types", obj_name="NoneType", source_backup="builtins"
+                )
+            )
         base = get_origin_robust(ga)
         args = get_args_robust(ga)
         assert (base is None) == (len(args) == 0)
         if base is None:
             assert isinstance(ga, type)
             return cls(base=ObjRef[type].from_obj(ga), params=None)
+        # A union is a type expression, not a generic class hierarchy. Its
+        # members must not be projected through get_args_at_base.
+        if base is types.UnionType or base is Union:
+            return cls(
+                base=ObjRef[type].from_obj(types.UnionType),
+                params=tuple(cls.from_ga(arg_value) for arg_value in args),
+            )
         arg_values = get_args_at_base(ga, base)
         return cls(
             base=ObjRef[type].from_obj(base),
             params=tuple(cls.from_ga(arg_value) for arg_value in arg_values),
         )
 
-    def get(self) -> type | types.GenericAlias:
+    def get(self) -> type | types.GenericAlias | types.UnionType:
         if self.params is None:
             return self.base.get_obj()
         params = tuple(param.get() for param in self.params)
+        if self.base.get_obj() is types.UnionType:
+            if len(params) < 2:
+                raise ValueError("A union reference requires at least two members")
+            return reduce(or_, params)
         return self.base.get_obj()[*params]  # type: ignore # should be a generic type if it has params
