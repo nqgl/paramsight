@@ -285,7 +285,7 @@ that matching origins imply compatible arguments.
 - Pydantic's own wrap-validator limitations still apply. In particular, a no-op model wrapper on the inspected Pydantic 2.13.5 rejects strict JSON tuple fields; this library change does not claim to fix that upstream behavior.
 - **Don't deserialize untrusted input with it.** A `TypeRef` is `module + qualified name`, and loading one calls `importlib.import_module` + `getattr` — so a malicious payload can trigger arbitrary imports / attribute lookups *before* the declared-parameter runtime check runs.
 - `ObjRef[Callable[...]]` checks callability without invoking the target. Callable argument and return annotations remain a static contract; this is not runtime signature validation. Concrete class references retain their `isinstance`/`issubclass` checks.
-- A `TypeRef` also keeps a `source_backup` and warns (or, in strict mode, raises) if the referenced object's source code has changed since serialization. Useful for catching drift, but an unusual behavior to be aware of.
+- `TypeRef.from_ga(..., include_source=False)` and `ObjRef.from_obj(..., include_source=False)` omit the optional module-source backup, including nested type arguments. Identity and runtime type validation remain unchanged; absent backups do not trigger source-drift warnings. The default retains backups and warns (or, in strict mode, raises) if source has changed.
 - Not re-exported from the package root — import it from `paramsight.generic_restored_basemodel.generic_basemodel`.
 
 ## Super() Injection

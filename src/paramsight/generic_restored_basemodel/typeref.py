@@ -27,12 +27,18 @@ class ObjRef[T = object](BaseModel):
     source_backup: str | None = None
 
     @classmethod
-    def from_obj(cls, o: FunctionType | type, dynamic_okay: bool = False) -> Self:
+    def from_obj(
+        cls,
+        o: FunctionType | type,
+        dynamic_okay: bool = False,
+        *,
+        include_source: bool = True,
+    ) -> Self:
         module = o.__module__
         if module == "__main__":
             raise ValueError(f"cannot safe ref to {o}: module is __main__")
         name = o.__name__
-        source_backup = get_src(o)
+        source_backup = get_src(o) if include_source else None
         test_module = importlib.import_module(module)
         test_obj = getattr(test_module, name)
         if test_obj is not o and not dynamic_okay:
@@ -60,7 +66,7 @@ class ObjRef[T = object](BaseModel):
         """
         module = importlib.import_module(self.module)
         obj = getattr(module, self.obj_name)
-        if get_src(obj) != self.source_backup:
+        if self.source_backup is not None and get_src(obj) != self.source_backup:
             warnings.warn(
                 f"loaded source code for {self.obj_name!r} appears to have "
                 f"changed since this model was serialized",
@@ -99,13 +105,15 @@ class TypeRef(BaseModel):
     params: "tuple[TypeRef, ...] | None" = None
 
     @classmethod
-    def from_ga(cls, ga: Any) -> Self:
+    def from_ga(cls, ga: Any, *, include_source: bool = True) -> Self:
         from paramsight.type_utils import get_args_robust, get_origin_robust
 
         if ga is types.NoneType:
             return cls(
                 base=ObjRef[type](
-                    module="types", obj_name="NoneType", source_backup="builtins"
+                    module="types",
+                    obj_name="NoneType",
+                    source_backup="builtins" if include_source else None,
                 )
             )
         base = get_origin_robust(ga)
@@ -113,18 +121,29 @@ class TypeRef(BaseModel):
         assert (base is None) == (len(args) == 0)
         if base is None:
             assert isinstance(ga, type)
-            return cls(base=ObjRef[type].from_obj(ga), params=None)
+            return cls(
+                base=ObjRef[type].from_obj(ga, include_source=include_source),
+                params=None,
+            )
         # A union is a type expression, not a generic class hierarchy. Its
         # members must not be projected through get_args_at_base.
         if base is types.UnionType or base is Union:
             return cls(
-                base=ObjRef[type].from_obj(types.UnionType),
-                params=tuple(cls.from_ga(arg_value) for arg_value in args),
+                base=ObjRef[type].from_obj(
+                    types.UnionType, include_source=include_source
+                ),
+                params=tuple(
+                    cls.from_ga(arg_value, include_source=include_source)
+                    for arg_value in args
+                ),
             )
         arg_values = get_args_at_base(ga, base)
         return cls(
-            base=ObjRef[type].from_obj(base),
-            params=tuple(cls.from_ga(arg_value) for arg_value in arg_values),
+            base=ObjRef[type].from_obj(base, include_source=include_source),
+            params=tuple(
+                cls.from_ga(arg_value, include_source=include_source)
+                for arg_value in arg_values
+            ),
         )
 
     def get(self) -> type | types.GenericAlias | types.UnionType:
