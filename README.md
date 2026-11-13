@@ -171,6 +171,7 @@ Notes:
       value_type = TypeVarValue[T]()
   ```
 - The type argument must be one of the owning class's own `TypeVar`s; otherwise `TypeVarValue` raises `TypeError` at class-definition time (for PEP 695 classes; for old-style `Generic[T]` classes the same error surfaces at first access).
+- PEP 695 Pydantic subclasses validate against their own declared parameters during class creation, not the parent's transiently inherited generic metadata.
 - Resolution handles the type-system's parameterized forms: unions (`T | None`), `Callable`, `Annotated`, PEP 695 **`type` aliases** (`type Pair[T] = tuple[T, T]` used as `Base[Pair[T]]` resolves to `Pair[int]`, keeping the alias), **`TypeVarTuple`** (`*Ts` flattens — `class Arch[*Ts](Base[tuple[*Ts]])` then `Arch[int, str]` resolves `Base`'s arg to `tuple[int, str]`), and **`ParamSpec`** (`Callable[P, R]`). A genuinely unsupported parameterized form is rejected with a clear `TypeError` rather than silently mis-resolved.
 
 The untyped equivalent is `get_typevar_value(cls, base, typevar)`.

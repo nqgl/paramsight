@@ -170,7 +170,7 @@ class _TypeVarValueBase:
         # ``U``. Defer to access time in those cases (``get_typevar_value``
         # raises if the parameter genuinely isn't the owner's).
         if owner.__type_params__:
-            params = list(get_parameters(owner))
+            params = list(owner.__type_params__)
             if typevar not in params:
                 raise TypeError(
                     f"{owner.__name__}.{self._name}: {typevar!r} is not a typevar "
